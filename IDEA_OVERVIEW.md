@@ -21,6 +21,6 @@ There is a periodic, offline batch process in the memory framework. Here are the
 2. We generate an embedding for each of these in the same way raw text embeddings are generated.
 note: We cannot multiply these embeddings directly to the existing memory embeddings because they are dense. We have to instead figure out what the common components of the dream theme vectors are. 
 3. We calculate the projection of each memory embedding on each theme embedding, and isolate that component from the "rest" of the memory - the parts that don't match the theme at all.
-4. We crank up the intensity of those parts of the vector that relate to the theme, then recombine the rest of the vector into it to get a version of the embedding where the Dream Director's theme is outsized now.
+4. We multiply the intensity of those parts of the vector that relate to the theme, then recombine the rest of the vector into it to get a version of the embedding where the Dream Director's theme is outsized now.
 5. We feed these new, distored vectors, into UMAP and HDBSCAN, for clustering memories. The outsized theme component will force previously less related concepts to be more likely to cluster together.
 6. An LLM uses the clustered memories to form new insights / reflections, etc... Other methods already in use are applied (much like they are in the claude code memory management repo) to help manage these new insights as useful memories.

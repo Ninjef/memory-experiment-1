@@ -48,9 +48,30 @@ def save_run(
     _save_run_stats(result, run_dir / "run_info.json", run_config)
 
     if result.viz_coords:
-        csv_path = run_dir / "viz_coords.csv"
-        _save_viz_coords(result, csv_path)
-        generate_viz_html(result, run_dir / "viz.html")
+        _save_viz_coords(result, run_dir / "viz_coords.csv")
+        if result.viz_coords_original:
+            # Steered space: what clustering actually saw
+            generate_viz_html(
+                result, run_dir / "viz_steered.html",
+                viz_coords=result.viz_coords,
+                title="Steered Embedding Space",
+            )
+            _save_viz_coords(
+                result, run_dir / "viz_coords_steered.csv",
+                viz_coords=result.viz_coords,
+            )
+            # Original space: same cluster colors, original positions
+            generate_viz_html(
+                result, run_dir / "viz_original.html",
+                viz_coords=result.viz_coords_original,
+                title="Original Embedding Space",
+            )
+            _save_viz_coords(
+                result, run_dir / "viz_coords_original.csv",
+                viz_coords=result.viz_coords_original,
+            )
+        else:
+            generate_viz_html(result, run_dir / "viz.html")
 
 
 def _save_insights(result: PipelineResult, path: Path) -> None:
@@ -143,8 +164,15 @@ def _save_run_stats(
         f.write("\n")
 
 
-def _save_viz_coords(result: PipelineResult, path: Path) -> None:
+def _save_viz_coords(
+    result: PipelineResult,
+    path: Path,
+    viz_coords: dict[str, tuple[float, float, float]] | None = None,
+) -> None:
     """Save 3D visualization coordinates as CSV: id, cluster_id, x, y, z, text."""
+    if viz_coords is None:
+        viz_coords = result.viz_coords
+
     # Build chunk_id -> cluster_id lookup
     id_to_cluster: dict[str, int] = {}
     id_to_text: dict[str, str] = {}
@@ -156,7 +184,7 @@ def _save_viz_coords(result: PipelineResult, path: Path) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["id", "cluster_id", "x", "y", "z", "text"])
-        for chunk_id, (x, y, z) in result.viz_coords.items():
+        for chunk_id, (x, y, z) in viz_coords.items():
             writer.writerow([
                 chunk_id,
                 id_to_cluster.get(chunk_id, -1),

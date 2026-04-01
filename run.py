@@ -5,6 +5,7 @@ Usage:
     python run.py data/sample_input.jsonl
     python run.py data/sample_input.jsonl --output-dir output/my_run
     python run.py data/sample_input.jsonl --model claude-haiku-4-5-20251001
+    python run.py data/sample_input.jsonl --steerer projection --themes "financial anxieties" "food and budget" --cluster-only
 """
 
 import argparse
@@ -21,9 +22,7 @@ from src.pipeline import Pipeline
 from src.synthesizer import AnthropicSynthesizer, DEFAULT_MODEL
 
 
-def main() -> None:
-    load_dotenv()
-
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the memory processing pipeline")
     parser.add_argument("input", help="Path to input JSONL file")
     parser.add_argument(
@@ -48,10 +47,42 @@ def main() -> None:
         help="Run only embedding and clustering, skip LLM synthesis (no API key needed)",
     )
     parser.add_argument(
+        "--steerer",
+        default=None,
+        help="Name of steerer module in src/steerers/ (e.g., 'projection'). Omit to skip steering.",
+    )
+    parser.add_argument(
+        "--clusterer",
+        default="umap_hdbscan",
+        choices=["umap_hdbscan"],
+        help="Clustering algorithm (default: umap_hdbscan)",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose logging to see each pipeline step",
     )
+    return parser
+
+
+def main() -> None:
+    load_dotenv()
+
+    parser = _build_parser()
+
+    # Two-phase parse: first pass discovers which steerer (if any) without
+    # handling --help, so steerer-specific args can be registered before help
+    # is printed.
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--steerer", default=None)
+    pre_args, _ = pre_parser.parse_known_args()
+
+    steerer_module = None
+    if pre_args.steerer:
+        from src.steerers import load_steerer_module
+        steerer_module = load_steerer_module(pre_args.steerer)
+        steerer_module.add_args(parser)
+
     args = parser.parse_args()
 
     # Configure logging
@@ -73,15 +104,21 @@ def main() -> None:
     chunks = load_chunks(args.input)
     print(f"Loaded {len(chunks)} chunks from {args.input}")
 
-    # Build pipeline
+    # Build components
     embedder = SentenceTransformerEmbedder()
     clusterer = UMAPHDBSCANClusterer(hdbscan_min_cluster_size=args.min_cluster_size)
+
+    steerer = None
+    if steerer_module is not None:
+        steerer = steerer_module.create(args, embedder)
+        print(f"Using steerer: {args.steerer}")
 
     if args.cluster_only:
         pipeline = Pipeline(
             embedder=embedder,
             clusterer=clusterer,
             synthesizer=None,
+            steerer=steerer,
         )
         result = pipeline.run_cluster_only(chunks)
     else:
@@ -89,6 +126,7 @@ def main() -> None:
             embedder=embedder,
             clusterer=clusterer,
             synthesizer=AnthropicSynthesizer(model=args.model),
+            steerer=steerer,
         )
         result = pipeline.run(chunks)
 
@@ -98,9 +136,15 @@ def main() -> None:
         "model": args.model if not args.cluster_only else "n/a (cluster-only)",
         "min_cluster_size": args.min_cluster_size,
         "embedder": "all-MiniLM-L6-v2",
-        "clusterer": "UMAP + HDBSCAN",
+        "clusterer": args.clusterer,
+        "steerer": args.steerer or "none",
         "synthesizer": f"Anthropic ({args.model})" if not args.cluster_only else "skipped (cluster-only)",
     }
+    if steerer_module is not None:
+        run_config["steerer_params"] = {
+            k: v for k, v in vars(args).items()
+            if k.startswith("steer") or k == "themes" or k == "themes_file"
+        }
     save_run(result, run_dir, run_config)
     print(f"\nRun saved to {run_dir}/")
     if not args.cluster_only:
@@ -108,8 +152,10 @@ def main() -> None:
     print(f"  clusters.json  — {len(result.clusters)} cluster(s) with all members")
     print(f"  run_info.json  — config and stats")
     if result.viz_coords:
-        print(f"  viz_coords.csv — 3D coordinates for {len(result.viz_coords)} points")
-        print(f"  viz.html       — open in browser for interactive 3D cluster view")
+        if result.viz_coords_original:
+            print(f"  viz_steered.html / viz_original.html — dual 3D views ({len(result.viz_coords)} points)")
+        else:
+            print(f"  viz.html       — open in browser for interactive 3D cluster view")
 
     if not args.cluster_only:
         # Print preview

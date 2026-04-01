@@ -8,8 +8,23 @@ from pathlib import Path
 from src.pipeline import PipelineResult
 
 
-def generate_viz_html(result: PipelineResult, output_path: Path) -> None:
-    """Write a standalone HTML file with an interactive 3D scatter plot."""
+def generate_viz_html(
+    result: PipelineResult,
+    output_path: Path,
+    viz_coords: dict[str, tuple[float, float, float]] | None = None,
+    title: str = "Cluster Visualization",
+) -> None:
+    """Write a standalone HTML file with an interactive 3D scatter plot.
+
+    Args:
+        result: Pipeline result (used for cluster/text lookups).
+        output_path: Where to write the HTML file.
+        viz_coords: Coordinate dict to visualize. Defaults to result.viz_coords.
+        title: Page title shown in the browser tab and header.
+    """
+    if viz_coords is None:
+        viz_coords = result.viz_coords
+
     # Build data payload
     id_to_cluster: dict[str, int] = {}
     id_to_text: dict[str, str] = {}
@@ -19,7 +34,7 @@ def generate_viz_html(result: PipelineResult, output_path: Path) -> None:
             id_to_text[chunk.id] = chunk.text
 
     points = []
-    for chunk_id, (x, y, z) in result.viz_coords.items():
+    for chunk_id, (x, y, z) in viz_coords.items():
         points.append({
             "id": chunk_id,
             "cluster": id_to_cluster.get(chunk_id, -1),
@@ -31,7 +46,9 @@ def generate_viz_html(result: PipelineResult, output_path: Path) -> None:
 
     data_json = json.dumps(points)
 
-    html = _HTML_TEMPLATE.replace("__DATA_JSON__", data_json)
+    html = _HTML_TEMPLATE.replace("__DATA_JSON__", data_json).replace(
+        "__TITLE__", title
+    )
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -40,7 +57,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Cluster Visualization</title>
+<title>__TITLE__</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #111; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
