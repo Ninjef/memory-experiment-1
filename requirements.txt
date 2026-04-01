@@ -1,0 +1,7 @@
+anthropic>=0.42.0
+sentence-transformers>=3.3.0
+hdbscan>=0.8.38
+umap-learn>=0.5.7
+numpy>=1.26.0
+python-dotenv>=1.0.1
+pytest>=8.0.0
