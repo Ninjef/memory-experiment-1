@@ -15,11 +15,16 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_INPUT = SCRIPT_DIR / "locomo10.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "locomo"
+
+# Add project root to path so we can import src.naming
+sys.path.insert(0, str(PROJECT_ROOT))
+from src.naming import generate_run_name
 
 
 def parse_locomo_datetime(raw: str) -> str:
@@ -85,19 +90,23 @@ def extract_entry(entry: dict) -> list[dict]:
     return records
 
 
-def write_jsonl(records: list[dict], output_dir: Path, filename_stem: str) -> Path:
-    """Write records to a JSONL file with count and timestamp in the name."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    count = len(records)
-    filename = f"{filename_stem}_{count}records_{ts}.jsonl"
-    path = output_dir / filename
-
+def write_jsonl(records: list[dict], path: Path) -> None:
+    """Write records to a JSONL file."""
     with open(path, "w", encoding="utf-8") as f:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    return path
+
+def save_extract_info(run_dir: Path, run_config: dict[str, Any]) -> None:
+    """Save extraction metadata to run_info.json, mirroring pipeline output style."""
+    info = {
+        "run_name": run_dir.name,
+        "run_timestamp": datetime.now(timezone.utc).isoformat(),
+        "config": run_config,
+    }
+    with open(run_dir / "run_info.json", "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def main():
@@ -113,7 +122,6 @@ def main():
     if args.limit and args.sample:
         parser.error("--limit and --sample are mutually exclusive")
 
-
     with open(args.input, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -128,26 +136,52 @@ def main():
             return records[:args.limit]
         return records
 
+    # Create a run folder with timestamp + fun name
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_dir = args.output_dir / generate_run_name(args.output_dir, ts)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build config that captures all input parameters
+    run_config: dict[str, Any] = {
+        "input_file": str(Path(args.input).resolve()),
+        "mode": "combined" if args.combine else "per_conversation",
+        "limit": args.limit,
+        "sample": args.sample,
+        "seed": args.seed,
+    }
+
     if args.combine:
         all_records = []
         for entry in data:
             all_records.extend(extract_entry(entry))
         all_records = apply_filter(all_records)
-        path = write_jsonl(all_records, args.output_dir, "all")
+        path = run_dir / f"all_{len(all_records)}records.jsonl"
+        write_jsonl(all_records, path)
+        run_config["total_records"] = len(all_records)
+        run_config["files"] = [path.name]
         print(f"  Wrote {len(all_records)} records -> {path}")
     else:
         total = 0
+        filenames = []
         for entry in data:
             records = apply_filter(extract_entry(entry))
             conv = entry["conversation"]
             sample_id = entry.get("sample_id", "unknown")
             sa = conv.get("speaker_a", "unknown").lower().replace(" ", "_")
             sb = conv.get("speaker_b", "unknown").lower().replace(" ", "_")
-            stem = f"{sample_id}_{sa}_{sb}"
-            path = write_jsonl(records, args.output_dir, stem)
+            filename = f"{sample_id}_{sa}_{sb}_{len(records)}records.jsonl"
+            path = run_dir / filename
+            write_jsonl(records, path)
+            filenames.append(filename)
             print(f"  {conv.get('speaker_a')} & {conv.get('speaker_b')}: {len(records)} records -> {path}")
             total += len(records)
+        run_config["total_records"] = total
+        run_config["files"] = filenames
         print(f"\nTotal: {total} records across {len(data)} files")
+
+    save_extract_info(run_dir, run_config)
+    print(f"\nExtraction saved to {run_dir}/")
+    print(f"  run_info.json — extraction config and parameters")
 
 
 if __name__ == "__main__":

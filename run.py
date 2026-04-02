@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from src.clusterer import UMAPHDBSCANClusterer
 from src.embedder import SentenceTransformerEmbedder
 from src.io import load_chunks, save_run
+from src.naming import generate_run_name
 from src.pipeline import Pipeline
 from src.synthesizer import AnthropicSynthesizer, DEFAULT_MODEL
 
@@ -96,7 +97,7 @@ def main() -> None:
     # Resolve output dir
     if args.output_dir is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        run_dir = Path("output") / f"run_{ts}"
+        run_dir = Path("output") / generate_run_name(Path("output"), ts)
     else:
         run_dir = Path(args.output_dir)
 
@@ -150,6 +151,7 @@ def main() -> None:
     if not args.cluster_only:
         print(f"  insights.json  — {len(result.insights)} insights with source texts")
     print(f"  clusters.json  — {len(result.clusters)} cluster(s) with all members")
+    print(f"  cluster_texts.json — cluster texts only, sorted by timestamp")
     print(f"  run_info.json  — config and stats")
     if result.viz_coords:
         if result.viz_coords_original:

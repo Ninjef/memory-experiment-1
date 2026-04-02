@@ -45,6 +45,7 @@ def save_run(
 
     _save_insights(result, run_dir / "insights.json")
     _save_clusters(result, run_dir / "clusters.json")
+    _save_cluster_texts(result, run_dir / "cluster_texts.json")
     _save_run_stats(result, run_dir / "run_info.json", run_config)
 
     if result.viz_coords:
@@ -121,6 +122,25 @@ def _save_clusters(result: PipelineResult, path: Path) -> None:
         f.write("\n")
 
 
+def _save_cluster_texts(result: PipelineResult, path: Path) -> None:
+    """Minimal cluster view: just the text of each cluster, sorted by timestamp."""
+    output: dict[str, Any] = {}
+    for cluster_id, chunks in sorted(result.clusters.items()):
+        label = "noise" if cluster_id == -1 else f"cluster_{cluster_id}"
+        sorted_chunks = sorted(
+            chunks,
+            key=lambda c: c.metadata.get("timestamp", ""),
+        )
+        output[label] = {
+            "insights": [],
+            "cluster_texts": [c.text for c in sorted_chunks],
+        }
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
 def _save_run_stats(
     result: PipelineResult,
     path: Path,
@@ -135,6 +155,7 @@ def _save_run_stats(
     real_clusters = {k: v for k, v in result.clusters.items() if k != -1}
 
     stats: dict[str, Any] = {
+        "run_name": path.parent.name,
         "run_timestamp": datetime.now(timezone.utc).isoformat(),
         "config": run_config,
         "input": {
