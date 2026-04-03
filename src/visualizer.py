@@ -25,7 +25,7 @@ def generate_viz_html(
     if viz_coords is None:
         viz_coords = result.viz_coords
 
-    # Build data payload
+    # Build data payload — memory points
     id_to_cluster: dict[str, int] = {}
     id_to_text: dict[str, str] = {}
     for cluster_id, chunks in result.clusters.items():
@@ -42,7 +42,68 @@ def generate_viz_html(
             "y": round(y, 5),
             "z": round(z, 5),
             "text": id_to_text.get(chunk_id, "")[:200],
+            "type": "memory",
         })
+
+    # Build insight points at cluster centroids
+    if result.insights and viz_coords:
+        # Compute centroid per cluster from viz_coords
+        cluster_coords: dict[int, list[tuple[float, float, float]]] = {}
+        for chunk_id, (x, y, z) in viz_coords.items():
+            cid = id_to_cluster.get(chunk_id, -1)
+            if cid != -1:
+                cluster_coords.setdefault(cid, []).append((x, y, z))
+
+        centroids: dict[int, tuple[float, float, float]] = {}
+        for cid, coords in cluster_coords.items():
+            n = len(coords)
+            centroids[cid] = (
+                sum(c[0] for c in coords) / n,
+                sum(c[1] for c in coords) / n,
+                sum(c[2] for c in coords) / n,
+            )
+
+        # Group insights by cluster_id
+        insights_by_cluster: dict[int, list] = {}
+        for insight in result.insights:
+            cid = insight.metadata.get("cluster_id")
+            if cid is not None and cid in centroids:
+                insights_by_cluster.setdefault(cid, []).append(insight)
+
+        # Compute a small offset scale based on data bounds
+        all_x = [p["x"] for p in points]
+        all_y = [p["y"] for p in points]
+        all_z = [p["z"] for p in points]
+        span = max(
+            (max(all_x) - min(all_x)) if all_x else 1,
+            (max(all_y) - min(all_y)) if all_y else 1,
+            (max(all_z) - min(all_z)) if all_z else 1,
+        ) or 1
+        offset_step = span * 0.04
+
+        for cid, insights in insights_by_cluster.items():
+            cx, cy, cz = centroids[cid]
+            for idx, insight in enumerate(insights):
+                # Offset along y-axis to avoid overlap
+                offset = idx * offset_step
+                tooltip_parts = [insight.text[:200]]
+                if insight.metadata.get("confidence") is not None:
+                    tooltip_parts.append(
+                        f"Confidence: {insight.metadata['confidence']}"
+                    )
+                if insight.metadata.get("suggestedAction"):
+                    tooltip_parts.append(
+                        f"Action: {insight.metadata['suggestedAction']}"
+                    )
+                points.append({
+                    "id": insight.id,
+                    "cluster": cid,
+                    "x": round(cx, 5),
+                    "y": round(cy + offset, 5),
+                    "z": round(cz, 5),
+                    "text": " | ".join(tooltip_parts),
+                    "type": "insight",
+                })
 
     data_json = json.dumps(points)
 
@@ -77,6 +138,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     background: rgba(0,0,0,0.7); padding: 14px 18px;
     border-radius: 8px; font-size: 13px;
     border: 1px solid rgba(255,255,255,0.1);
+    max-height: 80vh; overflow-y: auto;
   }
   #legend h3 { margin-bottom: 8px; font-size: 14px; }
   .legend-item { display: flex; align-items: center; margin: 4px 0; }
@@ -84,6 +146,21 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     width: 12px; height: 12px; border-radius: 50%;
     margin-right: 8px; flex-shrink: 0;
   }
+  .legend-swatch.diamond {
+    border-radius: 0; transform: rotate(45deg);
+    width: 10px; height: 10px;
+  }
+  #controls {
+    position: absolute; bottom: 16px; right: 16px;
+    background: rgba(0,0,0,0.7); padding: 10px 14px;
+    border-radius: 8px; font-size: 13px;
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  #controls label {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    user-select: none;
+  }
+  #controls input[type="checkbox"] { cursor: pointer; }
   #info {
     position: absolute; bottom: 16px; left: 16px;
     font-size: 12px; opacity: 0.5;
@@ -93,6 +170,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <body>
 <div id="tooltip"></div>
 <div id="legend"></div>
+<div id="controls"></div>
 <div id="info">Click + drag to rotate &middot; Scroll to zoom &middot; Right-click drag to pan</div>
 
 <script type="importmap">
@@ -109,17 +187,15 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const DATA = __DATA_JSON__;
 
-// Color palette — distinct hues, noise is gray
-const PALETTE = [
-  '#4e79a7', '#f28e2b', '#e15759', '#76b7b2', '#59a14f',
-  '#edc948', '#b07aa1', '#ff9da7', '#9c755f', '#bab0ac',
-  '#86bcb6', '#8cd17d', '#b6992d', '#499894', '#d37295',
-];
+const hasInsights = DATA.some(p => p.type === 'insight');
+
+// Color — golden-angle HSL for unlimited distinct colors, noise is gray
 const NOISE_COLOR = '#555555';
 
 function clusterColor(clusterId) {
   if (clusterId === -1) return NOISE_COLOR;
-  return PALETTE[clusterId % PALETTE.length];
+  const hue = (clusterId * 137.508) % 360;
+  return `hsl(${hue}, 70%, 55%)`;
 }
 
 // Setup scene
@@ -148,25 +224,36 @@ for (const p of DATA) {
 const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
 const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || 1;
 
-// Create points as spheres
+// Geometries
 const SPHERE_RADIUS = span * 0.018;
-const geometry = new THREE.SphereGeometry(SPHERE_RADIUS, 16, 12);
-const meshes = [];
+const sphereGeo = new THREE.SphereGeometry(SPHERE_RADIUS, 16, 12);
+const insightGeo = new THREE.OctahedronGeometry(SPHERE_RADIUS * 2.0);
+
+const memoryMeshes = [];
+const insightMeshes = [];
 
 for (const p of DATA) {
   const color = clusterColor(p.cluster);
+  const isInsight = p.type === 'insight';
+
   const material = new THREE.MeshStandardMaterial({
-    color: color,
-    roughness: 0.5,
-    metalness: 0.1,
+    color: isInsight ? '#ffffff' : color,
+    roughness: isInsight ? 0.3 : 0.5,
+    metalness: isInsight ? 0.2 : 0.1,
     emissive: color,
-    emissiveIntensity: 0.3,
+    emissiveIntensity: isInsight ? 0.6 : 0.3,
   });
-  const mesh = new THREE.Mesh(geometry, material);
+
+  const mesh = new THREE.Mesh(isInsight ? insightGeo : sphereGeo, material);
   mesh.position.set(p.x - cx, p.y - cy, p.z - cz);
   mesh.userData = p;
   scene.add(mesh);
-  meshes.push(mesh);
+
+  if (isInsight) {
+    insightMeshes.push(mesh);
+  } else {
+    memoryMeshes.push(mesh);
+  }
 }
 
 // Lighting
@@ -186,13 +273,32 @@ const legendEl = document.getElementById('legend');
 let legendHTML = '<h3>Clusters</h3>';
 for (const cid of clusterIds) {
   const label = cid === -1 ? 'Noise' : `Cluster ${cid}`;
-  const count = DATA.filter(p => p.cluster === cid).length;
+  const count = DATA.filter(p => p.cluster === cid && p.type !== 'insight').length;
   legendHTML += `<div class="legend-item">
     <div class="legend-swatch" style="background:${clusterColor(cid)}"></div>
     ${label} (${count})
   </div>`;
 }
+if (hasInsights) {
+  const insightCount = DATA.filter(p => p.type === 'insight').length;
+  legendHTML += `<div class="legend-item" style="margin-top:8px; border-top:1px solid rgba(255,255,255,0.1); padding-top:8px;">
+    <div class="legend-swatch diamond" style="background:#d4a017"></div>
+    Insights (${insightCount})
+  </div>`;
+}
 legendEl.innerHTML = legendHTML;
+
+// Controls — insight toggle
+const controlsEl = document.getElementById('controls');
+if (hasInsights) {
+  controlsEl.innerHTML = `<label><input type="checkbox" id="toggleInsights" checked> Show Insights</label>`;
+  document.getElementById('toggleInsights').addEventListener('change', (e) => {
+    const visible = e.target.checked;
+    for (const m of insightMeshes) {
+      m.visible = visible;
+    }
+  });
+}
 
 // Raycaster for hover tooltips
 const raycaster = new THREE.Raycaster();
@@ -200,19 +306,23 @@ const mouse = new THREE.Vector2();
 const tooltipEl = document.getElementById('tooltip');
 let hoveredMesh = null;
 
+function getAllVisibleMeshes() {
+  return [...memoryMeshes, ...insightMeshes.filter(m => m.visible)];
+}
+
 renderer.domElement.addEventListener('mousemove', (e) => {
   mouse.x = (e.clientX / innerWidth) * 2 - 1;
   mouse.y = -(e.clientY / innerHeight) * 2 + 1;
 
   raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(meshes);
+  const hits = raycaster.intersectObjects(getAllVisibleMeshes());
 
   if (hits.length > 0) {
     const mesh = hits[0].object;
     if (hoveredMesh !== mesh) {
       // Reset previous
       if (hoveredMesh) {
-        hoveredMesh.material.emissiveIntensity = 0.3;
+        hoveredMesh.material.emissiveIntensity = hoveredMesh.userData.type === 'insight' ? 0.6 : 0.3;
         hoveredMesh.scale.setScalar(1);
       }
       hoveredMesh = mesh;
@@ -220,9 +330,11 @@ renderer.domElement.addEventListener('mousemove', (e) => {
       mesh.scale.setScalar(1.4);
     }
     const p = mesh.userData;
+    const isInsight = p.type === 'insight';
     const clusterLabel = p.cluster === -1 ? 'Noise' : `Cluster ${p.cluster}`;
-    const color = clusterColor(p.cluster);
-    tooltipEl.innerHTML = `<div class="cluster-tag" style="background:${color}">${clusterLabel}</div><br>${p.text}`;
+    const tagColor = isInsight ? '#d4a017' : clusterColor(p.cluster);
+    const tagLabel = isInsight ? `Insight (${clusterLabel})` : clusterLabel;
+    tooltipEl.innerHTML = `<div class="cluster-tag" style="background:${tagColor}">${tagLabel}</div><br>${p.text}`;
     tooltipEl.style.display = 'block';
     tooltipEl.style.left = (e.clientX + 16) + 'px';
     tooltipEl.style.top = (e.clientY + 16) + 'px';
@@ -232,7 +344,7 @@ renderer.domElement.addEventListener('mousemove', (e) => {
     if (rect.bottom > innerHeight) tooltipEl.style.top = (e.clientY - rect.height - 16) + 'px';
   } else {
     if (hoveredMesh) {
-      hoveredMesh.material.emissiveIntensity = 0.3;
+      hoveredMesh.material.emissiveIntensity = hoveredMesh.userData.type === 'insight' ? 0.6 : 0.3;
       hoveredMesh.scale.setScalar(1);
       hoveredMesh = null;
     }

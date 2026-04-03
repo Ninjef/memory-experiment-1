@@ -20,6 +20,7 @@ from src.embedder import SentenceTransformerEmbedder
 from src.io import load_chunks, save_run
 from src.naming import generate_run_name
 from src.pipeline import Pipeline
+from src.prompts import load_prompt
 from src.synthesizer import AnthropicSynthesizer, DEFAULT_MODEL
 
 
@@ -41,6 +42,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Minimum cluster size for HDBSCAN (default: 3)",
+    )
+    parser.add_argument(
+        "--prompt",
+        default="default",
+        help="Name of prompt module in src/prompts/ (default: 'default'). "
+             "Try 'insight_generating' for psychiatry-style insights with confidence scoring.",
     )
     parser.add_argument(
         "--cluster-only",
@@ -123,10 +130,14 @@ def main() -> None:
         )
         result = pipeline.run_cluster_only(chunks)
     else:
+        prompt_module = load_prompt(args.prompt)
+        print(f"Using prompt: {args.prompt}")
         pipeline = Pipeline(
             embedder=embedder,
             clusterer=clusterer,
-            synthesizer=AnthropicSynthesizer(model=args.model),
+            synthesizer=AnthropicSynthesizer(
+                model=args.model, prompt_module=prompt_module
+            ),
             steerer=steerer,
         )
         result = pipeline.run(chunks)
@@ -139,6 +150,7 @@ def main() -> None:
         "embedder": "all-MiniLM-L6-v2",
         "clusterer": args.clusterer,
         "steerer": args.steerer or "none",
+        "prompt": args.prompt if not args.cluster_only else "n/a (cluster-only)",
         "synthesizer": f"Anthropic ({args.model})" if not args.cluster_only else "skipped (cluster-only)",
     }
     if steerer_module is not None:
@@ -151,7 +163,7 @@ def main() -> None:
     if not args.cluster_only:
         print(f"  insights.json  — {len(result.insights)} insights with source texts")
     print(f"  clusters.json  — {len(result.clusters)} cluster(s) with all members")
-    print(f"  cluster_texts.json — cluster texts only, sorted by timestamp")
+    print(f"  cluster_texts.md — cluster texts and insights in readable markdown")
     print(f"  run_info.json  — config and stats")
     if result.viz_coords:
         if result.viz_coords_original:

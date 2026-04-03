@@ -45,7 +45,7 @@ def save_run(
 
     _save_insights(result, run_dir / "insights.json")
     _save_clusters(result, run_dir / "clusters.json")
-    _save_cluster_texts(result, run_dir / "cluster_texts.json")
+    _save_cluster_texts_md(result, run_dir / "cluster_texts.md")
     _save_run_stats(result, run_dir / "run_info.json", run_config)
 
     if result.viz_coords:
@@ -76,15 +76,23 @@ def save_run(
 
 
 def _save_insights(result: PipelineResult, path: Path) -> None:
-    """Pretty-printed insights with source texts inline."""
+    """Pretty-printed insights with source texts and full prompt result inline."""
     output = []
     for insight in result.insights:
         entry: dict[str, Any] = {
             "id": insight.id,
             "insight": insight.text,
             "cluster_id": insight.metadata.get("cluster_id"),
-            "source_memories": [],
         }
+        # Include extra fields from the prompt module (confidence, suggestedAction, etc.)
+        for key in ("confidence", "suggestedAction"):
+            if insight.metadata.get(key) is not None:
+                entry[key] = insight.metadata[key]
+        # Full raw LLM response for traceability
+        if "prompt_result" in insight.metadata:
+            entry["prompt_result"] = insight.metadata["prompt_result"]
+
+        entry["source_memories"] = []
         source_ids = insight.metadata.get("source_ids", [])
         source_texts = insight.metadata.get("source_texts", [])
         for sid, stxt in zip(source_ids, source_texts):
@@ -122,23 +130,63 @@ def _save_clusters(result: PipelineResult, path: Path) -> None:
         f.write("\n")
 
 
-def _save_cluster_texts(result: PipelineResult, path: Path) -> None:
-    """Minimal cluster view: just the text of each cluster, sorted by timestamp."""
-    output: dict[str, Any] = {}
+def _save_cluster_texts_md(result: PipelineResult, path: Path) -> None:
+    """Human-readable markdown view of clusters with insights and texts."""
+    # Group insights by cluster_id
+    insights_by_cluster: dict[int, list[MemoryChunk]] = {}
+    for insight in result.insights:
+        cid = insight.metadata.get("cluster_id")
+        if cid is not None:
+            insights_by_cluster.setdefault(cid, []).append(insight)
+
+    lines: list[str] = []
+
     for cluster_id, chunks in sorted(result.clusters.items()):
-        label = "noise" if cluster_id == -1 else f"cluster_{cluster_id}"
+        label = "Noise" if cluster_id == -1 else f"Cluster {cluster_id}"
+        lines.append(f"# {label} ({len(chunks)} texts)")
+        lines.append("")
+
+        # Insights section (only if this cluster has insights)
+        cluster_insights = insights_by_cluster.get(cluster_id, [])
+        if cluster_insights:
+            lines.append("## Insights")
+            lines.append("")
+            for insight in cluster_insights:
+                lines.append(f"> **Insight:** {insight.text}")
+                if insight.metadata.get("confidence") is not None:
+                    lines.append(
+                        f"> **Confidence:** {insight.metadata['confidence']}"
+                    )
+                if insight.metadata.get("suggestedAction"):
+                    lines.append(
+                        f"> **Suggested Action:** "
+                        f"{insight.metadata['suggestedAction']}"
+                    )
+                lines.append(">")
+                lines.append("")
+
+        # Texts section
+        lines.append("## Texts")
+        lines.append("")
+
         sorted_chunks = sorted(
             chunks,
             key=lambda c: c.metadata.get("timestamp", ""),
         )
-        output[label] = {
-            "insights": [],
-            "cluster_texts": [c.text for c in sorted_chunks],
-        }
+        for i, chunk in enumerate(sorted_chunks, 1):
+            lines.append("---")
+            lines.append("")
+            lines.append(f"**Text {i}**")
+            lines.append("")
+            lines.append(chunk.text)
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+        lines.append("")
 
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+        f.write("\n".join(lines))
 
 
 def _save_run_stats(
