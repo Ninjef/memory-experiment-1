@@ -5,8 +5,10 @@ __pycache__/
 *.pyo
 output/run_*/
 .pytest_cache/
+.cache/
 *.egg-info/
 dist/
 build/
 .env
 data/locomo/*
+output/archive/*

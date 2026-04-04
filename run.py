@@ -60,6 +60,16 @@ def _build_parser() -> argparse.ArgumentParser:
              "Try 'theme_nn' for theme-based nearest-neighbor clustering.",
     )
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable embedding cache (force fresh computation every run)",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=".cache",
+        help="Directory for the embedding cache (default: .cache)",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose logging to see each pipeline step",
@@ -111,7 +121,9 @@ def main() -> None:
     print(f"Loaded {len(chunks)} chunks from {args.input}")
 
     # Build components
-    embedder = SentenceTransformerEmbedder()
+    embedder = SentenceTransformerEmbedder(
+        cache_dir=args.cache_dir, no_cache=args.no_cache
+    )
     clusterer = clusterer_module.create(args, embedder)
     print(f"Using clusterer: {args.clusterer}")
 
