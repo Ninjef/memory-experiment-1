@@ -15,7 +15,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from src.clusterer import UMAPHDBSCANClusterer
+from src.clusterers import load_clusterer_module
 from src.embedder import SentenceTransformerEmbedder
 from src.io import load_chunks, save_run
 from src.naming import generate_run_name
@@ -38,12 +38,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"Anthropic model for synthesis (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
-        "--min-cluster-size",
-        type=int,
-        default=3,
-        help="Minimum cluster size for HDBSCAN (default: 3)",
-    )
-    parser.add_argument(
         "--prompt",
         default="default",
         help="Name of prompt module in src/prompts/ (default: 'default'). "
@@ -62,8 +56,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clusterer",
         default="umap_hdbscan",
-        choices=["umap_hdbscan"],
-        help="Clustering algorithm (default: umap_hdbscan)",
+        help="Name of clusterer module in src/clusterers/ (default: 'umap_hdbscan'). "
+             "Try 'theme_nn' for theme-based nearest-neighbor clustering.",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -78,11 +72,12 @@ def main() -> None:
 
     parser = _build_parser()
 
-    # Two-phase parse: first pass discovers which steerer (if any) without
-    # handling --help, so steerer-specific args can be registered before help
+    # Two-phase parse: first pass discovers which steerer/clusterer without
+    # handling --help, so module-specific args can be registered before help
     # is printed.
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--steerer", default=None)
+    pre_parser.add_argument("--clusterer", default="umap_hdbscan")
     pre_args, _ = pre_parser.parse_known_args()
 
     steerer_module = None
@@ -90,6 +85,9 @@ def main() -> None:
         from src.steerers import load_steerer_module
         steerer_module = load_steerer_module(pre_args.steerer)
         steerer_module.add_args(parser)
+
+    clusterer_module = load_clusterer_module(pre_args.clusterer)
+    clusterer_module.add_args(parser)
 
     args = parser.parse_args()
 
@@ -114,7 +112,8 @@ def main() -> None:
 
     # Build components
     embedder = SentenceTransformerEmbedder()
-    clusterer = UMAPHDBSCANClusterer(hdbscan_min_cluster_size=args.min_cluster_size)
+    clusterer = clusterer_module.create(args, embedder)
+    print(f"Using clusterer: {args.clusterer}")
 
     steerer = None
     if steerer_module is not None:
@@ -146,7 +145,6 @@ def main() -> None:
     run_config = {
         "input_file": str(Path(args.input).resolve()),
         "model": args.model if not args.cluster_only else "n/a (cluster-only)",
-        "min_cluster_size": args.min_cluster_size,
         "embedder": "all-MiniLM-L6-v2",
         "clusterer": args.clusterer,
         "steerer": args.steerer or "none",
@@ -157,6 +155,11 @@ def main() -> None:
         run_config["steerer_params"] = {
             k: v for k, v in vars(args).items()
             if k.startswith("steer") or k == "themes" or k == "themes_file"
+        }
+    if args.clusterer != "umap_hdbscan":
+        run_config["clusterer_params"] = {
+            k: v for k, v in vars(args).items()
+            if k.startswith("cluster_theme") or k.startswith("theme_") or k == "min_cluster_size"
         }
     save_run(result, run_dir, run_config)
     print(f"\nRun saved to {run_dir}/")

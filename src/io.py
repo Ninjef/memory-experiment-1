@@ -49,13 +49,15 @@ def save_run(
     _save_run_stats(result, run_dir / "run_info.json", run_config)
 
     if result.viz_coords:
+        run_name = run_dir.name
         _save_viz_coords(result, run_dir / "viz_coords.csv")
         if result.viz_coords_original:
             # Steered space: what clustering actually saw
             generate_viz_html(
                 result, run_dir / "viz_steered.html",
                 viz_coords=result.viz_coords,
-                title="Steered Embedding Space",
+                title=f"{run_name} — Steered Embedding Space",
+                run_config=run_config,
             )
             _save_viz_coords(
                 result, run_dir / "viz_coords_steered.csv",
@@ -65,14 +67,19 @@ def save_run(
             generate_viz_html(
                 result, run_dir / "viz_original.html",
                 viz_coords=result.viz_coords_original,
-                title="Original Embedding Space",
+                title=f"{run_name} — Original Embedding Space",
+                run_config=run_config,
             )
             _save_viz_coords(
                 result, run_dir / "viz_coords_original.csv",
                 viz_coords=result.viz_coords_original,
             )
         else:
-            generate_viz_html(result, run_dir / "viz.html")
+            generate_viz_html(
+                result, run_dir / "viz.html",
+                title=run_name,
+                run_config=run_config,
+            )
 
 
 def _save_insights(result: PipelineResult, path: Path) -> None:

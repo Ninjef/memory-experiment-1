@@ -13,6 +13,7 @@ def generate_viz_html(
     output_path: Path,
     viz_coords: dict[str, tuple[float, float, float]] | None = None,
     title: str = "Cluster Visualization",
+    run_config: dict | None = None,
 ) -> None:
     """Write a standalone HTML file with an interactive 3D scatter plot.
 
@@ -21,6 +22,7 @@ def generate_viz_html(
         output_path: Where to write the HTML file.
         viz_coords: Coordinate dict to visualize. Defaults to result.viz_coords.
         title: Page title shown in the browser tab and header.
+        run_config: Pipeline configuration dict to display in the UI.
     """
     if viz_coords is None:
         viz_coords = result.viz_coords
@@ -106,10 +108,11 @@ def generate_viz_html(
                 })
 
     data_json = json.dumps(points)
+    config_json = json.dumps(run_config or {})
 
     html = _HTML_TEMPLATE.replace("__DATA_JSON__", data_json).replace(
         "__TITLE__", title
-    )
+    ).replace("__CONFIG_JSON__", config_json)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -165,9 +168,43 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     position: absolute; bottom: 16px; left: 16px;
     font-size: 12px; opacity: 0.5;
   }
+  #run-name {
+    position: absolute; top: 16px; left: 16px;
+    font-size: 18px; font-weight: 600; opacity: 0.85;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+  }
+  #config-panel {
+    position: absolute; top: 50px; left: 16px;
+    background: rgba(0,0,0,0.7); padding: 14px 18px;
+    border-radius: 8px; font-size: 12px;
+    border: 1px solid rgba(255,255,255,0.1);
+    max-width: 320px; max-height: 60vh; overflow-y: auto;
+  }
+  #config-panel h3 {
+    margin-bottom: 8px; font-size: 13px; font-weight: 600;
+    opacity: 0.9;
+  }
+  #config-panel table { border-collapse: collapse; width: 100%; }
+  #config-panel td {
+    padding: 3px 0; vertical-align: top; line-height: 1.4;
+  }
+  #config-panel td.cfg-key {
+    color: rgba(255,255,255,0.5); padding-right: 12px; white-space: nowrap;
+  }
+  #config-panel td.cfg-val {
+    color: rgba(255,255,255,0.85); word-break: break-word;
+  }
+  #config-panel .cfg-section {
+    margin-top: 8px; padding-top: 6px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+    font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.5);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
 </style>
 </head>
 <body>
+<div id="run-name">__TITLE__</div>
+<div id="config-panel"></div>
 <div id="tooltip"></div>
 <div id="legend"></div>
 <div id="controls"></div>
@@ -186,6 +223,30 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const DATA = __DATA_JSON__;
+const CONFIG = __CONFIG_JSON__;
+
+// Build config panel
+{
+  const panel = document.getElementById('config-panel');
+  const entries = Object.entries(CONFIG);
+  if (entries.length > 0) {
+    let html = '<h3>Configuration</h3><table>';
+    for (const [key, value] of entries) {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        html += `<tr><td colspan="2" class="cfg-section">${key.replace(/_/g, ' ')}</td></tr>`;
+        for (const [sk, sv] of Object.entries(value)) {
+          const display = sv === null ? 'none' : Array.isArray(sv) ? sv.join(', ') : sv;
+          html += `<tr><td class="cfg-key">${sk.replace(/_/g, ' ')}</td><td class="cfg-val">${display}</td></tr>`;
+        }
+      } else {
+        const display = value === null ? 'none' : Array.isArray(value) ? value.join(', ') : value;
+        html += `<tr><td class="cfg-key">${key.replace(/_/g, ' ')}</td><td class="cfg-val">${display}</td></tr>`;
+      }
+    }
+    html += '</table>';
+    panel.innerHTML = html;
+  }
+}
 
 const hasInsights = DATA.some(p => p.type === 'insight');
 

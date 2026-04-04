@@ -1,5 +1,10 @@
+"""UMAP + HDBSCAN clustering: reduces dimensionality with UMAP, then clusters
+with HDBSCAN.  This is the default clusterer for the pipeline.
+"""
+
 from __future__ import annotations
 
+import argparse
 import logging
 from collections import defaultdict
 
@@ -90,3 +95,19 @@ class UMAPHDBSCANClusterer:
             random_state=42,
         )
         return reducer.fit_transform(embeddings)
+
+
+def add_args(parser: argparse.ArgumentParser) -> None:
+    """Register UMAP/HDBSCAN-specific CLI arguments."""
+    group = parser.add_argument_group("umap_hdbscan clusterer")
+    group.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=3,
+        help="Minimum cluster size for HDBSCAN (default: 3)",
+    )
+
+
+def create(args: argparse.Namespace, embedder) -> UMAPHDBSCANClusterer:
+    """Build a UMAPHDBSCANClusterer from parsed CLI args."""
+    return UMAPHDBSCANClusterer(hdbscan_min_cluster_size=args.min_cluster_size)
