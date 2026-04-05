@@ -12,3 +12,5 @@ build/
 .env
 data/locomo/*
 output/archive/*
+rawDataPreFormatted/jeffArnoldGeminiChats/
+rawDataPreFormatted/jeffArnoldGeminiChats_parsedFromHTMLToJson/
