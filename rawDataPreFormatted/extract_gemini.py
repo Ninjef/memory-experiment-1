@@ -60,7 +60,7 @@ def parse_gemini_datetime(raw: str, tz_abbr: str) -> str:
         return raw
 
 
-def strip_html(text: str) -> str:
+def strip_html(text: str, normalize_whitespace: bool = True) -> str:
     """Remove HTML tags and decode entities to plain text."""
     # Replace <br> and block-level tags with newlines
     text = re.sub(r'<br\s*/?>', '\n', text)
@@ -70,9 +70,22 @@ def strip_html(text: str) -> str:
     text = re.sub(r'<[^>]+>', '', text)
     # Decode HTML entities
     text = html.unescape(text)
-    # Collapse excessive blank lines
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+
+    if normalize_whitespace:
+        # Strip trailing whitespace from each line
+        lines = [line.rstrip() for line in text.splitlines()]
+        # Remove leading indentation that's purely from HTML nesting
+        lines = [line.lstrip() for line in lines]
+        text = '\n'.join(lines)
+        # Collapse runs of blank lines down to at most one
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        # Remove leading/trailing blank lines
+        text = text.strip()
+    else:
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = text.strip()
+
+    return text
 
 
 def classify_entry(content_text: str) -> tuple[str, str]:
@@ -111,7 +124,7 @@ def extract_blocks(full_html: str) -> list[str]:
     return blocks
 
 
-def parse_block(block_html: str) -> dict | None:
+def parse_block(block_html: str, normalize_whitespace: bool = True) -> dict | None:
     """Parse a single outer-cell block into a structured entry dict."""
     # Find the content cell (6-col, body-1, NOT text-right)
     content_match = re.search(
@@ -161,8 +174,8 @@ def parse_block(block_html: str) -> dict | None:
         # Trim trailing <br> before the div closes
         response_html = re.sub(r'<br>\s*$', '', response_html.strip())
 
-        result["user_prompt"] = strip_html(prompt_html)
-        result["ai_response"] = strip_html(response_html)
+        result["user_prompt"] = strip_html(prompt_html, normalize_whitespace)
+        result["ai_response"] = strip_html(response_html, normalize_whitespace)
         result["ai_response_html"] = response_html.strip()
 
     elif entry_type == 'canvas' and dt_match:
@@ -175,11 +188,11 @@ def parse_block(block_html: str) -> dict | None:
         # Split title from body: title is before the first <br>
         title_match = re.match(r'(.*?)<br>(.*)', before_dt, re.DOTALL)
         if title_match:
-            result["canvas_title"] = strip_html(title_match.group(1))
-            result["ai_response"] = strip_html(title_match.group(2))
+            result["canvas_title"] = strip_html(title_match.group(1), normalize_whitespace)
+            result["ai_response"] = strip_html(title_match.group(2), normalize_whitespace)
             result["ai_response_html"] = title_match.group(2).strip()
         else:
-            result["canvas_title"] = strip_html(before_dt)
+            result["canvas_title"] = strip_html(before_dt, normalize_whitespace)
             result["ai_response"] = ""
             result["ai_response_html"] = ""
 
@@ -194,6 +207,8 @@ def main():
     parser.add_argument("input", type=Path, help="Path to MyActivity.html")
     parser.add_argument("--user", required=True, help="Username for metadata")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Output directory")
+    parser.add_argument("--raw-whitespace", action="store_true",
+                        help="Preserve original whitespace/indentation from HTML (default: normalize)")
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -210,7 +225,7 @@ def main():
     skipped = 0
 
     for block in blocks:
-        entry = parse_block(block)
+        entry = parse_block(block, normalize_whitespace=not args.raw_whitespace)
         if entry is None:
             skipped += 1
             continue

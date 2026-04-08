@@ -94,6 +94,30 @@ Key parsing decisions:
 - **First-match-only splitting**: Only the first datetime match separates prompt from response, preventing incorrect splits when AI responses contain dates.
 - **Follows extract_locomo.py conventions**: Uses `generate_run_name()` for output folder naming, writes `run_info.json` metadata, and follows the same CLI/output patterns.
 
+---
+
+## Follow-up: Whitespace normalization — 2026-04-08
+
+### Problem
+
+Some HTML entries (e.g., pasted LinkedIn profiles) contained deeply nested `<div>`/`<span>` elements that produced excessive indentation and blank line runs in the plain text output. The `strip_html` function was converting each HTML tag to a newline but not cleaning up the resulting whitespace, leading to entries with dozens of blank lines and deep indentation.
+
+### Solution
+
+Updated `strip_html()` to normalize whitespace by default:
+- Strips leading indentation (from HTML nesting) on each line
+- Strips trailing whitespace on each line
+- Collapses runs of 3+ blank lines down to a single blank line
+
+Added `--raw-whitespace` CLI flag to preserve original whitespace when needed.
+
+### Changes
+
+- **`rawDataPreFormatted/extract_gemini.py`**:
+  - `strip_html()` gains `normalize_whitespace` parameter (default `True`)
+  - `parse_block()` gains `normalize_whitespace` parameter, threaded to all `strip_html()` calls
+  - New CLI arg `--raw-whitespace` to opt out of normalization
+
 ## Task reference
 
 Implements the first script described in `projectTasks/PERSONAL_DATA_PARSING.md`. The second script (further formatting for pipeline consumption) is deferred as specified in that task document.
