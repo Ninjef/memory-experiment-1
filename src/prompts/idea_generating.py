@@ -35,7 +35,7 @@ consumption by software. I always use the following format:
 {
   "summary": "<My text summary of what themes the texts cover and the ideas I'm having related to it>",
   "confidence": <a numeric rating from 0 to 10 about how confident I am that there is an interesting idea worth considering here>,
-  "newIdea": "<My top idea>"
+  "newIdea": "<My top idea, summarized in 40 words or less>"
 }
 
 Respond ONLY with the raw JSON object — no markdown, no code fences, 
