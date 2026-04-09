@@ -6,8 +6,10 @@ import numpy as np
 import pytest
 
 from src.embedding_cache import EmbeddingCache
-from src.embedder import SentenceTransformerEmbedder
+from src.embedder import DEFAULT_MODEL_NAME, _MODEL_PREFIXES, SentenceTransformerEmbedder
 from src.models import MemoryChunk
+
+_PREFIX = _MODEL_PREFIXES.get(DEFAULT_MODEL_NAME, "")
 
 
 def _fake_encode(texts, show_progress_bar=False):
@@ -36,11 +38,11 @@ def test_uncached_texts_trigger_model_load(tmp_path, mock_st):
 
 
 def test_cached_texts_skip_model_load(tmp_path, mock_st):
-    # Pre-populate cache
-    cache = EmbeddingCache(tmp_path, "all-MiniLM-L6-v2")
+    # Pre-populate cache with prefixed keys (as the embedder stores them)
+    cache = EmbeddingCache(tmp_path, DEFAULT_MODEL_NAME)
     cache.put_many({
-        "hello": [1.0, 2.0, 3.0],
-        "world": [4.0, 5.0, 6.0],
+        f"{_PREFIX}hello": [1.0, 2.0, 3.0],
+        f"{_PREFIX}world": [4.0, 5.0, 6.0],
     })
     cache.close()
 
@@ -54,9 +56,9 @@ def test_cached_texts_skip_model_load(tmp_path, mock_st):
 
 
 def test_partial_cache_only_encodes_uncached(tmp_path, mock_st):
-    # Cache one text
-    cache = EmbeddingCache(tmp_path, "all-MiniLM-L6-v2")
-    cache.put_many({"cached text": [1.0, 2.0, 3.0]})
+    # Cache one text with prefixed key
+    cache = EmbeddingCache(tmp_path, DEFAULT_MODEL_NAME)
+    cache.put_many({f"{_PREFIX}cached text": [1.0, 2.0, 3.0]})
     cache.close()
 
     embedder = SentenceTransformerEmbedder(cache_dir=tmp_path)
@@ -74,9 +76,9 @@ def test_partial_cache_only_encodes_uncached(tmp_path, mock_st):
 
 
 def test_no_cache_flag_bypasses_cache(tmp_path, mock_st):
-    # Pre-populate cache
-    cache = EmbeddingCache(tmp_path, "all-MiniLM-L6-v2")
-    cache.put_many({"hello": [1.0, 2.0, 3.0]})
+    # Pre-populate cache with prefixed key
+    cache = EmbeddingCache(tmp_path, DEFAULT_MODEL_NAME)
+    cache.put_many({f"{_PREFIX}hello": [1.0, 2.0, 3.0]})
     cache.close()
 
     embedder = SentenceTransformerEmbedder(cache_dir=tmp_path, no_cache=True)
@@ -94,11 +96,11 @@ def test_new_embeddings_are_persisted(tmp_path, mock_st):
     embedder.embed(chunks)
     original_embedding = chunks[0].embedding
 
-    # Verify it's in the cache via a fresh cache instance
-    cache = EmbeddingCache(tmp_path, "all-MiniLM-L6-v2")
-    result = cache.get_many(["persist me"])
-    assert "persist me" in result
-    np.testing.assert_array_almost_equal(result["persist me"], original_embedding, decimal=6)
+    # Verify it's in the cache via a fresh cache instance (using prefixed key)
+    cache = EmbeddingCache(tmp_path, DEFAULT_MODEL_NAME)
+    result = cache.get_many([f"{_PREFIX}persist me"])
+    assert f"{_PREFIX}persist me" in result
+    np.testing.assert_array_almost_equal(result[f"{_PREFIX}persist me"], original_embedding, decimal=6)
     cache.close()
 
 

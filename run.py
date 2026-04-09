@@ -16,7 +16,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.clusterers import load_clusterer_module
-from src.embedder import SentenceTransformerEmbedder
+from src.embedder import DEFAULT_MODEL_NAME, SentenceTransformerEmbedder
 from src.io import load_chunks, save_run
 from src.naming import generate_run_name
 from src.pipeline import Pipeline
@@ -68,6 +68,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cache-dir",
         default=".cache",
         help="Directory for the embedding cache (default: .cache)",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help=f"Sentence-transformer model name (default: {DEFAULT_MODEL_NAME})",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -122,7 +127,9 @@ def main() -> None:
 
     # Build components
     embedder = SentenceTransformerEmbedder(
-        cache_dir=args.cache_dir, no_cache=args.no_cache
+        model_name=args.embedding_model or DEFAULT_MODEL_NAME,
+        cache_dir=args.cache_dir,
+        no_cache=args.no_cache,
     )
     clusterer = clusterer_module.create(args, embedder)
     print(f"Using clusterer: {args.clusterer}")
@@ -157,7 +164,7 @@ def main() -> None:
     run_config = {
         "input_file": str(Path(args.input).resolve()),
         "model": args.model if not args.cluster_only else "n/a (cluster-only)",
-        "embedder": "all-MiniLM-L6-v2",
+        "embedder": embedder.model_name,
         "clusterer": args.clusterer,
         "steerer": args.steerer or "none",
         "prompt": args.prompt if not args.cluster_only else "n/a (cluster-only)",

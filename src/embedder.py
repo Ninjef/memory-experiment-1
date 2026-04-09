@@ -7,7 +7,12 @@ from src.models import MemoryChunk
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"  # 384-dim, ~80MB, fast
+DEFAULT_MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"  # 768-dim, ~137MB, 8192 tokens
+
+# Models that require a task prefix prepended to all input texts.
+_MODEL_PREFIXES: dict[str, str] = {
+    "nomic-ai/nomic-embed-text-v1.5": "search_document: ",
+}
 
 
 class SentenceTransformerEmbedder:
@@ -35,7 +40,7 @@ class SentenceTransformerEmbedder:
             from sentence_transformers import SentenceTransformer
 
             log.info("Loading embedding model '%s' (may download on first run)...", self.model_name)
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, trust_remote_code=True)
             log.info("Embedding model loaded.")
         return self._model
 
@@ -43,7 +48,9 @@ class SentenceTransformerEmbedder:
         if not chunks:
             return chunks
 
-        texts = [c.text for c in chunks]
+        # Apply model-specific prefix (e.g. nomic requires "search_document: ")
+        prefix = _MODEL_PREFIXES.get(self.model_name, "")
+        texts = [prefix + c.text for c in chunks]
 
         # Look up cached embeddings
         cached: dict[str, list[float]] = {}
