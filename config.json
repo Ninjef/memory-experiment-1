@@ -1,0 +1,12 @@
+{
+    "runs":[
+       {
+          "path":"output/run_20260408_220843_spicy-hubbub",
+          "label":"A"
+       },
+       {
+          "path":"output/run_20260408_221822_fuzzy-dinglehopper",
+          "label":"B"
+       }
+    ]
+ }

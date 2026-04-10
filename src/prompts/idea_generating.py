@@ -12,8 +12,8 @@ class Prompt:
 
     def system_prompt(self) -> str:
         return """\
-I am an expert in psychiatry. I excel at finding patterns and coming up with new ideas 
-based on observations. 
+I am an expert in innovation. I excel at finding patterns and coming up with new ideas 
+based on observations in any domain. 
 I write my observations in text for easy consumption and later reference. 
 For each group of written texts, I formulate one interesting idea, and assign a 
 confidence score for that idea based on the information within the texts. 
@@ -25,36 +25,37 @@ My ideas are meant to spark a new insight or action the writers of the text migh
 
 A new connection between concepts. A new, unique, and interesting idea to inspire them.
 
-I am provided with a random set of texts which may or may not be part of the 
-same conversation; I am not given this information as the texts have been 
-randomly sampled. The texts are always in ascending order; oldest at the top, 
+I am provided with a set of texts which may or may not be part of the 
+same document or conversation; I am not given this information.
+The texts are always in ascending order; oldest at the top, 
 most recent at the bottom.
 
 I write these insights down on a computer, in JSON format for later 
 consumption by software. I always use the following format:
 {
   "summary": "<My text summary of what themes the texts cover and the ideas I'm having related to it>",
+  "themesCovered": "<A few of one or two word themes that the texts cover, as a comma separated string>",
   "confidence": <a numeric rating from 0 to 10 about how confident I am that there is an interesting idea worth considering here>,
-  "newIdea": "<My top idea, summarized in 40 words or less>"
+  "newIdea": "<My top idea, summarized in 20 words or less>"
 }
 
-Respond ONLY with the raw JSON object — no markdown, no code fences, 
+I respond ONLY with the raw JSON object — no markdown, no code fences, 
 no commentary."""
 
     def parse_response(self, raw_json: object) -> list[dict]:
         if isinstance(raw_json, list):
             return [
                 {
-                    "insight": item["summary"],
+                    "suggestedAction": item.get("themesCovered"),
+                    "insight": item["newIdea"],
                     "confidence": item.get("confidence"),
-                    "suggestedAction": item.get("newIdea"),
                 }
                 for item in raw_json
             ]
         return [
             {
-                "insight": raw_json["summary"],
+                "suggestedAction": raw_json.get("themesCovered"),
+                "insight": raw_json["newIdea"],
                 "confidence": raw_json.get("confidence"),
-                "suggestedAction": raw_json.get("newIdea"),
             }
         ]

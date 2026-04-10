@@ -10,7 +10,7 @@ output/run_*/
 dist/
 build/
 .env
-data/locomo/*
+data/*
 output/archive/*
 rawDataPreFormatted/jeffArnoldGeminiChats/
 rawDataPreFormatted/jeffArnoldGeminiChats_parsedFromHTMLToJson/

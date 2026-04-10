@@ -132,9 +132,31 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     border-radius: 6px; font-size: 13px; max-width: 360px;
     line-height: 1.4; border: 1px solid rgba(255,255,255,0.15);
   }
-  #tooltip .cluster-tag {
+  #tooltip .cluster-tag, .pinned-tooltip .cluster-tag {
     display: inline-block; padding: 2px 8px; border-radius: 3px;
     font-size: 11px; font-weight: 600; margin-bottom: 6px;
+  }
+  .pinned-tooltip {
+    position: absolute; pointer-events: auto;
+    background: rgba(0,0,0,0.9); color: #fff; padding: 10px 14px;
+    border-radius: 6px; font-size: 13px; max-width: 360px;
+    line-height: 1.4; border: 1px solid rgba(255,255,255,0.3);
+    z-index: 90;
+  }
+  .pinned-tooltip .pin-close {
+    position: absolute; top: 4px; right: 8px;
+    cursor: pointer; opacity: 0.5; font-size: 14px;
+  }
+  .pinned-tooltip .pin-close:hover { opacity: 1; }
+  #pin-lines {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 89;
+  }
+  .pin-dot {
+    position: absolute; width: 8px; height: 8px;
+    border-radius: 50%; border: 2px solid rgba(255,255,255,0.8);
+    pointer-events: none; z-index: 91;
+    transform: translate(-50%, -50%);
   }
   #legend {
     position: absolute; top: 16px; right: 16px;
@@ -206,9 +228,10 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="run-name">__TITLE__</div>
 <div id="config-panel"></div>
 <div id="tooltip"></div>
+<svg id="pin-lines"></svg>
 <div id="legend"></div>
 <div id="controls"></div>
-<div id="info">Click + drag to rotate &middot; Scroll to zoom &middot; Right-click drag to pan</div>
+<div id="info">Click point to pin text &middot; Esc to clear &middot; Drag to rotate &middot; Scroll to zoom</div>
 
 <script type="importmap">
 {
@@ -349,10 +372,42 @@ if (hasInsights) {
 }
 legendEl.innerHTML = legendHTML;
 
-// Controls — insight toggle
+// Controls
 const controlsEl = document.getElementById('controls');
+const UNCOLORED = new THREE.Color('#7ab8f5');
+let clusteringVisible = true;
+
+let controlsHTML = '<label><input type="checkbox" id="toggleClustering" checked> Show Clustering</label>';
 if (hasInsights) {
-  controlsEl.innerHTML = `<label><input type="checkbox" id="toggleInsights" checked> Show Insights</label>`;
+  controlsHTML += '<label style="margin-top:4px"><input type="checkbox" id="toggleInsights" checked> Show Insights</label>';
+}
+controlsEl.innerHTML = controlsHTML;
+
+function applyClusterColors() {
+  if (clusteringVisible) {
+    for (const m of memoryMeshes) {
+      const col = new THREE.Color(clusterColor(m.userData.cluster));
+      m.material.color.copy(col);
+      m.material.emissive.copy(col);
+      m.material.emissiveIntensity = 0.3;
+    }
+    legendEl.style.display = '';
+  } else {
+    for (const m of memoryMeshes) {
+      m.material.color.copy(UNCOLORED);
+      m.material.emissive.copy(UNCOLORED);
+      m.material.emissiveIntensity = 0.4;
+    }
+    legendEl.style.display = 'none';
+  }
+}
+
+document.getElementById('toggleClustering').addEventListener('change', (e) => {
+  clusteringVisible = e.target.checked;
+  applyClusterColors();
+});
+
+if (hasInsights) {
   document.getElementById('toggleInsights').addEventListener('change', (e) => {
     const visible = e.target.checked;
     for (const m of insightMeshes) {
@@ -395,7 +450,8 @@ renderer.domElement.addEventListener('mousemove', (e) => {
     const clusterLabel = p.cluster === -1 ? 'Noise' : `Cluster ${p.cluster}`;
     const tagColor = isInsight ? '#d4a017' : clusterColor(p.cluster);
     const tagLabel = isInsight ? `Insight (${clusterLabel})` : clusterLabel;
-    tooltipEl.innerHTML = `<div class="cluster-tag" style="background:${tagColor}">${tagLabel}</div><br>${p.text}`;
+    const tagHTML = clusteringVisible ? `<div class="cluster-tag" style="background:${tagColor}">${tagLabel}</div><br>` : '';
+    tooltipEl.innerHTML = tagHTML + p.text;
     tooltipEl.style.display = 'block';
     tooltipEl.style.left = (e.clientX + 16) + 'px';
     tooltipEl.style.top = (e.clientY + 16) + 'px';
@@ -413,6 +469,133 @@ renderer.domElement.addEventListener('mousemove', (e) => {
   }
 });
 
+// Click-to-pin tooltips with connector lines
+const pinnedTips = []; // each: { el, mesh, line, dot }
+const pinLinesSvg = document.getElementById('pin-lines');
+let mouseDownPos = null;
+const PIN_COLORS = ['#f47', '#4bf', '#fb3', '#6f6', '#c7f', '#f90', '#3df', '#f6a', '#7ff', '#df5'];
+let pinColorIdx = 0;
+
+function projectToScreen(mesh) {
+  const v = mesh.position.clone().project(camera);
+  return {
+    x: (v.x * 0.5 + 0.5) * innerWidth,
+    y: (-v.y * 0.5 + 0.5) * innerHeight,
+  };
+}
+
+function updatePinLines() {
+  for (const pin of pinnedTips) {
+    const scr = projectToScreen(pin.mesh);
+    // Update dot position
+    pin.dot.style.left = scr.x + 'px';
+    pin.dot.style.top = scr.y + 'px';
+    // Update line: from dot to nearest edge of tooltip
+    const rect = pin.el.getBoundingClientRect();
+    const tipCx = rect.left + rect.width / 2;
+    const tipCy = rect.top + rect.height / 2;
+    // Clamp to tooltip edge
+    const dx = scr.x - tipCx, dy = scr.y - tipCy;
+    const absDx = Math.abs(dx), absDy = Math.abs(dy);
+    let ex, ey;
+    if (absDx / (rect.width / 2) > absDy / (rect.height / 2)) {
+      const side = dx > 0 ? rect.left : rect.right;
+      ex = side; ey = tipCy + dy * Math.abs((side - tipCx) / dx || 0);
+    } else {
+      const side = dy > 0 ? rect.top : rect.bottom;
+      ey = side; ex = tipCx + dx * Math.abs((side - tipCy) / dy || 0);
+    }
+    pin.line.setAttribute('x1', scr.x);
+    pin.line.setAttribute('y1', scr.y);
+    pin.line.setAttribute('x2', ex);
+    pin.line.setAttribute('y2', ey);
+  }
+}
+
+renderer.domElement.addEventListener('mousedown', (e) => {
+  mouseDownPos = { x: e.clientX, y: e.clientY };
+});
+
+renderer.domElement.addEventListener('mouseup', (e) => {
+  if (!mouseDownPos) return;
+  const dx = e.clientX - mouseDownPos.x;
+  const dy = e.clientY - mouseDownPos.y;
+  if (dx * dx + dy * dy > 25) return;
+
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(getAllVisibleMeshes());
+
+  if (hits.length > 0) {
+    const hitMesh = hits[0].object;
+    const p = hitMesh.userData;
+    const isInsight = p.type === 'insight';
+    const clusterLabel = p.cluster === -1 ? 'Noise' : `Cluster ${p.cluster}`;
+    const tagColor = isInsight ? '#d4a017' : clusterColor(p.cluster);
+    const tagLabel = isInsight ? `Insight (${clusterLabel})` : clusterLabel;
+
+    const pinColor = PIN_COLORS[pinColorIdx % PIN_COLORS.length];
+    pinColorIdx++;
+
+    const el = document.createElement('div');
+    el.className = 'pinned-tooltip';
+    el.style.borderColor = pinColor;
+    const pinTagHTML = clusteringVisible ? `<div class="cluster-tag" style="background:${tagColor}">${tagLabel}</div><br>` : '';
+    el.innerHTML = `<span class="pin-close">&times;</span>` + pinTagHTML + p.text;
+    el.style.left = (e.clientX + 16) + 'px';
+    el.style.top = (e.clientY + 16) + 'px';
+    document.body.appendChild(el);
+
+    const rect = el.getBoundingClientRect();
+    if (rect.right > innerWidth) el.style.left = (e.clientX - rect.width - 16) + 'px';
+    if (rect.bottom > innerHeight) el.style.top = (e.clientY - rect.height - 16) + 'px';
+
+    // Connector line
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('stroke', pinColor);
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('stroke-opacity', '0.7');
+    pinLinesSvg.appendChild(line);
+
+    // Dot on the node
+    const dot = document.createElement('div');
+    dot.className = 'pin-dot';
+    dot.style.borderColor = pinColor;
+    dot.style.background = pinColor;
+    document.body.appendChild(dot);
+
+    // Paint the 3D mesh the pin color (save originals to restore on close)
+    const origColor = hitMesh.material.color.clone();
+    const origEmissive = hitMesh.material.emissive.clone();
+    const meshPinColor = new THREE.Color(pinColor);
+    hitMesh.material.color.copy(meshPinColor);
+    hitMesh.material.emissive.copy(meshPinColor);
+
+    const pinObj = { el, mesh: hitMesh, line, dot, origColor, origEmissive };
+
+    el.querySelector('.pin-close').addEventListener('click', () => {
+      el.remove(); line.remove(); dot.remove();
+      hitMesh.material.color.copy(origColor);
+      hitMesh.material.emissive.copy(origEmissive);
+      const idx = pinnedTips.indexOf(pinObj);
+      if (idx !== -1) pinnedTips.splice(idx, 1);
+    });
+    pinnedTips.push(pinObj);
+  }
+});
+
+addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    for (const pin of pinnedTips) {
+      pin.el.remove(); pin.line.remove(); pin.dot.remove();
+      pin.mesh.material.color.copy(pin.origColor);
+      pin.mesh.material.emissive.copy(pin.origEmissive);
+    }
+    pinnedTips.length = 0;
+  }
+});
+
 // Resize
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -425,6 +608,7 @@ function animate() {
   requestAnimationFrame(animate);
   controls.update();
   renderer.render(scene, camera);
+  updatePinLines();
 }
 animate();
 </script>
