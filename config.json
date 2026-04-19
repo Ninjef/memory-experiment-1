@@ -1,12 +1,36 @@
 {
     "runs":[
        {
-          "path":"output/run_20260408_220843_spicy-hubbub",
-          "label":"A"
+          "path":"output/run_20260416_155114_frothy-geyser",
+          "label":"1"
        },
        {
-          "path":"output/run_20260408_221822_fuzzy-dinglehopper",
-          "label":"B"
+          "path":"output/run_20260410_221330_tiny-waffle",
+          "label":"2"
+       },
+       {
+          "path":"output/run_20260410_221416_breezy-banjo",
+          "label":"5"
+       },
+       {
+          "path":"output/run_20260410_221504_sloppy-taco",
+          "label":"10"
+       },
+       {
+          "path":"output/run_20260410_221714_goofy-cymbal",
+          "label":"30"
+       },
+       {
+          "path":"output/run_20260410_221631_plucky-toadstool",
+          "label":"100"
+       },
+       {
+          "path":"output/run_20260410_221836_lunar-doohickey",
+          "label":"200"
+       },
+       {
+          "path":"output/run_20260416_153646_swoopy-nebula",
+          "label":"200"
        }
     ]
  }

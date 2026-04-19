@@ -20,6 +20,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 
 def text_hash(text: str) -> str:
     """SHA256 hash of text, truncated to 16 hex chars."""
@@ -29,7 +31,7 @@ def text_hash(text: str) -> str:
 def load_coords(run_dir: Path, coords_file: str) -> list[dict]:
     """Load viz_coords CSV from a run directory.
 
-    Returns list of dicts with keys: id, cluster_id, x, y, z, text.
+    Returns list of dicts with keys: id, cluster_id, x, y, z, text, type.
     """
     csv_path = run_dir / coords_file
     if not csv_path.exists():
@@ -46,8 +48,155 @@ def load_coords(run_dir: Path, coords_file: str) -> list[dict]:
                 "y": float(row["y"]),
                 "z": float(row["z"]),
                 "text": row["text"],
+                "type": "memory",
             })
     return rows
+
+
+def load_insights(run_dir: Path, memory_rows: list[dict]) -> list[dict]:
+    """Load insights.json and position them at cluster centroids.
+
+    Returns list of dicts matching the same shape as load_coords output,
+    with type="insight".  Returns empty list if no insights.json exists.
+    """
+    insights_path = run_dir / "insights.json"
+    if not insights_path.exists():
+        return []
+
+    with open(insights_path, "r", encoding="utf-8") as f:
+        insights = json.load(f)
+
+    if not insights:
+        return []
+
+    cluster_coords: dict[int, list[tuple[float, float, float]]] = {}
+    for row in memory_rows:
+        cid = row["cluster_id"]
+        if cid != -1:
+            cluster_coords.setdefault(cid, []).append(
+                (row["x"], row["y"], row["z"])
+            )
+
+    centroids: dict[int, tuple[float, float, float]] = {}
+    for cid, coords in cluster_coords.items():
+        n = len(coords)
+        centroids[cid] = (
+            sum(c[0] for c in coords) / n,
+            sum(c[1] for c in coords) / n,
+            sum(c[2] for c in coords) / n,
+        )
+
+    all_x = [r["x"] for r in memory_rows]
+    all_y = [r["y"] for r in memory_rows]
+    all_z = [r["z"] for r in memory_rows]
+    span = max(
+        (max(all_x) - min(all_x)) if all_x else 1,
+        (max(all_y) - min(all_y)) if all_y else 1,
+        (max(all_z) - min(all_z)) if all_z else 1,
+    ) or 1
+    offset_step = span * 0.04
+
+    insights_by_cluster: dict[int, list[dict]] = {}
+    for ins in insights:
+        cid = ins.get("cluster_id")
+        if cid is not None and cid in centroids:
+            insights_by_cluster.setdefault(cid, []).append(ins)
+
+    rows = []
+    for cid, cluster_insights in insights_by_cluster.items():
+        cx, cy, cz = centroids[cid]
+        for idx, ins in enumerate(cluster_insights):
+            offset = idx * offset_step
+            insight_text = ins.get("insight", ins.get("text", ""))[:200]
+            rows.append({
+                "id": ins["id"],
+                "cluster_id": cid,
+                "x": cx,
+                "y": cy + offset,
+                "z": cz,
+                "text": insight_text,
+                "type": "insight",
+            })
+
+    return rows
+
+
+def align_runs_to_reference(
+    all_runs_rows: list[list[dict]],
+) -> list[list[dict]]:
+    """Apply Procrustes alignment so runs >=1 match run 0's coordinate frame.
+
+    Each run's viz_coords comes from an independently-fit UMAP, so coordinate
+    frames differ in rotation, reflection, translation, and scale. For each
+    run k>=1, find uniform-scale rigid transform (s, R, t) that minimizes
+    sum ||s R x_i + t - y_i||^2 over points shared (by text hash) with run 0,
+    then apply it to every point in run k.
+    """
+    if len(all_runs_rows) < 2:
+        return all_runs_rows
+
+    ref_rows = all_runs_rows[0]
+    ref_by_hash: dict[str, dict] = {}
+    for row in ref_rows:
+        h = text_hash(row["text"])
+        if h not in ref_by_hash:
+            ref_by_hash[h] = row
+
+    aligned = [list(ref_rows)]
+
+    for k in range(1, len(all_runs_rows)):
+        rows_k = all_runs_rows[k]
+
+        X_list, Y_list = [], []
+        seen: set[str] = set()
+        for row in rows_k:
+            h = text_hash(row["text"])
+            if h in seen:
+                continue
+            seen.add(h)
+            ref = ref_by_hash.get(h)
+            if ref is None:
+                continue
+            X_list.append([row["x"], row["y"], row["z"]])
+            Y_list.append([ref["x"], ref["y"], ref["z"]])
+
+        if len(X_list) < 3:
+            print(
+                f"Warning: run {k} has only {len(X_list)} shared points with "
+                f"run 0; skipping alignment.",
+                file=sys.stderr,
+            )
+            aligned.append(list(rows_k))
+            continue
+
+        X = np.array(X_list, dtype=float)
+        Y = np.array(Y_list, dtype=float)
+        mx = X.mean(axis=0)
+        my = Y.mean(axis=0)
+        Xc = X - mx
+        Yc = Y - my
+
+        M = Yc.T @ Xc
+        U, S, Vt = np.linalg.svd(M)
+        R = U @ Vt  # reflection allowed
+
+        denom = float((Xc * Xc).sum())
+        s = float(S.sum()) / denom if denom > 0 else 1.0
+        t = my - s * (R @ mx)
+
+        new_rows = []
+        for row in rows_k:
+            p = np.array([row["x"], row["y"], row["z"]], dtype=float)
+            p2 = s * (R @ p) + t
+            new_rows.append({
+                **row,
+                "x": float(p2[0]),
+                "y": float(p2[1]),
+                "z": float(p2[2]),
+            })
+        aligned.append(new_rows)
+
+    return aligned
 
 
 def match_points(
@@ -61,6 +210,7 @@ def match_points(
     # Build union of all text hashes
     hash_to_text: dict[str, str] = {}
     hash_to_positions: dict[str, list[dict | None]] = {}
+    hash_to_type: dict[str, str] = {}
 
     num_runs = len(all_runs_rows)
 
@@ -76,6 +226,7 @@ def match_points(
             if h not in hash_to_text:
                 hash_to_text[h] = row["text"][:200]
                 hash_to_positions[h] = [None] * num_runs
+                hash_to_type[h] = row.get("type", "memory")
 
             hash_to_positions[h][run_idx] = {
                 "x": round(row["x"], 5),
@@ -89,6 +240,7 @@ def match_points(
         points.append({
             "hash": h,
             "text": text,
+            "type": hash_to_type[h],
             "positions": hash_to_positions[h],
         })
 
@@ -142,8 +294,11 @@ def build_payload_single(config: dict) -> dict:
         run_dir = Path(run_entry["path"])
         label = run_entry.get("label", run_dir.name)
         runs_meta.append({"label": label, "index": i})
-        all_runs_rows.append(load_coords(run_dir, coords_file))
+        memory_rows = load_coords(run_dir, coords_file)
+        insight_rows = load_insights(run_dir, memory_rows)
+        all_runs_rows.append(memory_rows + insight_rows)
 
+    all_runs_rows = align_runs_to_reference(all_runs_rows)
     points = match_points(all_runs_rows)
 
     return {
@@ -171,8 +326,11 @@ def build_payload_side_by_side(config: dict) -> dict:
             run_dir = Path(run_entry["path"])
             label = run_entry.get("label", run_dir.name)
             runs_meta.append({"label": label, "index": i})
-            all_runs_rows.append(load_coords(run_dir, coords_file))
+            memory_rows = load_coords(run_dir, coords_file)
+            insight_rows = load_insights(run_dir, memory_rows)
+            all_runs_rows.append(memory_rows + insight_rows)
 
+        all_runs_rows = align_runs_to_reference(all_runs_rows)
         points = match_points(all_runs_rows)
 
         sides[side_key] = {
@@ -269,17 +427,24 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     line-height: 1.4; border: 1px solid rgba(255,255,255,0.15);
     z-index: 100;
   }
+  #tooltip .type-tag, .pinned-tooltip .type-tag {
+    display: inline-block; padding: 2px 8px; border-radius: 3px;
+    font-size: 11px; font-weight: 600; margin-bottom: 6px; margin-right: 4px;
+  }
+  .type-tag.memory { background: #4a90d9; }
+  .type-tag.insight { background: #d4a017; }
   #tooltip .cluster-tag, .pinned-tooltip .cluster-tag {
     display: inline-block; padding: 2px 8px; border-radius: 3px;
     font-size: 11px; font-weight: 600; margin-bottom: 6px;
   }
   .pinned-tooltip {
-    position: absolute; pointer-events: auto;
+    position: absolute; pointer-events: auto; cursor: grab;
     background: rgba(0,0,0,0.9); color: #fff; padding: 10px 14px;
     border-radius: 6px; font-size: 13px; max-width: 360px;
     line-height: 1.4; border: 1px solid rgba(255,255,255,0.3);
-    z-index: 90;
+    z-index: 90; user-select: none;
   }
+  .pinned-tooltip.dragging { cursor: grabbing; }
   .pinned-tooltip .pin-close {
     position: absolute; top: 4px; right: 8px;
     cursor: pointer; opacity: 0.5; font-size: 14px;
@@ -295,6 +460,25 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     pointer-events: none; z-index: 91;
     transform: translate(-50%, -50%);
   }
+  .pin-color-toggle {
+    display: inline-block; margin-top: 6px; cursor: pointer;
+    font-size: 11px; opacity: 0.6; user-select: none;
+  }
+  .pin-color-toggle:hover { opacity: 1; }
+  .pin-color-toggle .pin-color-indicator {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    vertical-align: middle; margin-right: 4px;
+  }
+  .pin-color-row {
+    display: none; gap: 4px; margin-top: 6px; flex-wrap: wrap;
+  }
+  .pin-color-row.open { display: flex; }
+  .pin-swatch {
+    width: 16px; height: 16px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; box-sizing: border-box;
+  }
+  .pin-swatch:hover { border-color: rgba(255,255,255,0.6); }
+  .pin-swatch.active { border-color: #fff; }
 
   .viz-container {
     position: relative; width: 100vw; height: 100vh;
@@ -339,18 +523,18 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     border: 1px solid rgba(255,255,255,0.1);
     width: 100%; margin-top: 8px;
   }
-  .slider-labels {
-    display: flex; justify-content: space-between;
-    margin-bottom: 4px;
+  .slider-labels, .slider-labels-right {
+    position: relative; height: 14px;
   }
-  .slider-labels span { opacity: 0.4; transition: opacity 0.3s; font-size: 11px; }
-  .slider-labels span.active { opacity: 1.0; font-weight: 600; }
-  .slider-labels-right {
-    display: flex; justify-content: space-between;
-    margin-top: 3px; color: #8cf;
+  .slider-labels { margin-bottom: 4px; }
+  .slider-labels-right { margin-top: 3px; color: #8cf; }
+  .slider-labels span, .slider-labels-right span {
+    position: absolute; transform: translateX(-50%); white-space: nowrap;
+    opacity: 0.4; transition: opacity 0.3s; font-size: 11px; top: 0;
   }
-  .slider-labels-right span { opacity: 0.4; transition: opacity 0.3s; font-size: 11px; }
-  .slider-labels-right span.active { opacity: 1.0; font-weight: 600; }
+  .slider-labels span.active, .slider-labels-right span.active {
+    opacity: 1.0; font-weight: 600;
+  }
   .run-slider {
     width: 100%; cursor: pointer;
     accent-color: #6af;
@@ -475,25 +659,27 @@ class VizPanel {
     // Geometry
     const sphereRadius = this.span * 0.018;
     const sphereGeo = new THREE.SphereGeometry(sphereRadius, 16, 12);
+    const diamondGeo = new THREE.OctahedronGeometry(sphereRadius * 2, 0);
 
     // Create meshes for all points
     for (const pt of this.pointsData) {
+      const isInsight = pt.type === 'insight';
       // Find position in run 0, or first available
       const initPos = pt.positions[0] || pt.positions.find(p => p !== null);
       const clusterId = initPos ? initPos.cluster : -1;
-      const color = clusterColor(clusterId);
+      const color = isInsight ? '#ffffff' : clusterColor(clusterId);
 
       const material = new THREE.MeshStandardMaterial({
         color: color,
-        roughness: 0.5,
-        metalness: 0.1,
+        roughness: isInsight ? 0.3 : 0.5,
+        metalness: isInsight ? 0.2 : 0.1,
         emissive: color,
-        emissiveIntensity: 0.3,
+        emissiveIntensity: isInsight ? 0.6 : 0.3,
         transparent: true,
         opacity: pt.positions[0] ? 1.0 : 0.0,
       });
 
-      const mesh = new THREE.Mesh(sphereGeo, material);
+      const mesh = new THREE.Mesh(isInsight ? diamondGeo : sphereGeo, material);
       mesh.userData = { pointData: pt };
 
       if (initPos) {
@@ -603,15 +789,80 @@ class VizPanel {
         const el = document.createElement('div');
         el.className = 'pinned-tooltip';
         el.style.borderColor = pinColor;
-        const pinTagHTML = this.clusteringVisible ? `<div class="cluster-tag" style="background:${tagColor}">${clusterLabel}</div><br>` : '';
-        el.innerHTML = `<span class="pin-close">&times;</span>` + pinTagHTML + pt.text;
-        el.style.left = (e.clientX + 16) + 'px';
-        el.style.top = (e.clientY + 16) + 'px';
+        const isInsight = pt.type === 'insight';
+        const typeTag = `<span class="type-tag ${isInsight ? 'insight' : 'memory'}">${isInsight ? 'New Idea' : 'Memory'}</span>`;
+        const clusterTag = this.clusteringVisible ? `<span class="cluster-tag" style="background:${tagColor}">${clusterLabel}</span>` : '';
+        el.innerHTML = `<span class="pin-close">&times;</span>` + typeTag + clusterTag + '<br>' + pt.text;
+
+        const colorToggle = document.createElement('div');
+        colorToggle.className = 'pin-color-toggle';
+        const indicator = document.createElement('span');
+        indicator.className = 'pin-color-indicator';
+        indicator.style.background = pinColor;
+        colorToggle.appendChild(indicator);
+        colorToggle.appendChild(document.createTextNode('color'));
+        el.appendChild(colorToggle);
+
+        const swatchRow = document.createElement('div');
+        swatchRow.className = 'pin-color-row';
+        PIN_COLORS.forEach(c => {
+          const sw = document.createElement('span');
+          sw.className = 'pin-swatch';
+          sw.style.background = c;
+          if (c === pinColor) sw.classList.add('active');
+          sw.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            el.style.borderColor = c;
+            dot.style.borderColor = c;
+            dot.style.background = c;
+            line.setAttribute('stroke', c);
+            indicator.style.background = c;
+            const mc = new THREE.Color(c);
+            hitMesh.material.color.copy(mc);
+            hitMesh.material.emissive.copy(mc);
+            swatchRow.querySelectorAll('.pin-swatch').forEach(s => s.classList.remove('active'));
+            sw.classList.add('active');
+            swatchRow.classList.remove('open');
+          });
+          swatchRow.appendChild(sw);
+        });
+        el.appendChild(swatchRow);
+        colorToggle.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          swatchRow.classList.toggle('open');
+        });
+
+        const scr = this._projectToScreen(hitMesh);
+        const pinOffset = { x: 16, y: 16 };
+        el.style.left = (scr.x + pinOffset.x) + 'px';
+        el.style.top = (scr.y + pinOffset.y) + 'px';
         document.body.appendChild(el);
 
         const pr = el.getBoundingClientRect();
-        if (pr.right > innerWidth) el.style.left = (e.clientX - pr.width - 16) + 'px';
-        if (pr.bottom > innerHeight) el.style.top = (e.clientY - pr.height - 16) + 'px';
+        if (pr.right > innerWidth) { pinOffset.x = -(pr.width + 16); el.style.left = (scr.x + pinOffset.x) + 'px'; }
+        if (pr.bottom > innerHeight) { pinOffset.y = -(pr.height + 16); el.style.top = (scr.y + pinOffset.y) + 'px'; }
+
+        // Drag to reposition
+        let dragStart = null;
+        el.addEventListener('mousedown', (ev) => {
+          if (ev.target.closest('.pin-close, .pin-color-toggle, .pin-swatch')) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+          dragStart = { mx: ev.clientX, my: ev.clientY, ox: pinOffset.x, oy: pinOffset.y };
+          el.classList.add('dragging');
+          const onMove = (me) => {
+            pinOffset.x = dragStart.ox + (me.clientX - dragStart.mx);
+            pinOffset.y = dragStart.oy + (me.clientY - dragStart.my);
+          };
+          const onUp = () => {
+            dragStart = null;
+            el.classList.remove('dragging');
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        });
 
         // Connector line
         const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -634,7 +885,7 @@ class VizPanel {
         hitMesh.material.color.copy(meshPinColor);
         hitMesh.material.emissive.copy(meshPinColor);
 
-        const pinObj = { el, mesh: hitMesh, line, dot, origColor, origEmissive };
+        const pinObj = { el, mesh: hitMesh, line, dot, origColor, origEmissive, pinOffset };
 
         el.querySelector('.pin-close').addEventListener('click', () => {
           el.remove(); line.remove(); dot.remove();
@@ -689,8 +940,10 @@ class VizPanel {
       const clusterLabel = clusterId === -1 ? 'Noise' : `Cluster ${clusterId}`;
       const tagColor = clusterColor(clusterId);
 
-      const tagHTML = this.clusteringVisible ? `<div class="cluster-tag" style="background:${tagColor}">${clusterLabel}</div><br>` : '';
-      tooltipEl.innerHTML = tagHTML + pt.text;
+      const hoverIsInsight = pt.type === 'insight';
+      const hoverTypeTag = `<span class="type-tag ${hoverIsInsight ? 'insight' : 'memory'}">${hoverIsInsight ? 'New Idea' : 'Memory'}</span>`;
+      const hoverClusterTag = this.clusteringVisible ? `<span class="cluster-tag" style="background:${tagColor}">${clusterLabel}</span>` : '';
+      tooltipEl.innerHTML = hoverTypeTag + hoverClusterTag + '<br>' + pt.text;
       tooltipEl.style.display = 'block';
       tooltipEl.style.left = (e.clientX + 16) + 'px';
       tooltipEl.style.top = (e.clientY + 16) + 'px';
@@ -776,6 +1029,8 @@ class VizPanel {
       const scr = this._projectToScreen(pin.mesh);
       pin.dot.style.left = scr.x + 'px';
       pin.dot.style.top = scr.y + 'px';
+      pin.el.style.left = (scr.x + pin.pinOffset.x) + 'px';
+      pin.el.style.top = (scr.y + pin.pinOffset.y) + 'px';
       const rect = pin.el.getBoundingClientRect();
       const tipCx = rect.left + rect.width / 2;
       const tipCy = rect.top + rect.height / 2;
@@ -804,6 +1059,7 @@ class VizPanel {
     for (let i = 0; i < this.meshes.length; i++) {
       const mesh = this.meshes[i];
       if (!mesh.visible) continue;
+      if (this.pointsData[i].type === 'insight') continue;
       const pos = this.pointsData[i].positions[this.currentRun];
       if (!pos) continue;
       const col = this._colorFor(pos.cluster);
@@ -819,6 +1075,7 @@ class VizPanel {
       const posA = pt.positions[fromRun];
       const posB = pt.positions[toRun];
       const mesh = this.meshes[i];
+      const isInsight = pt.type === 'insight';
 
       if (posA && posB) {
         mesh.position.set(
@@ -829,24 +1086,30 @@ class VizPanel {
         mesh.material.opacity = 1.0;
         mesh.visible = true;
 
-        const activePos = t < 0.5 ? posA : posB;
-        const col = this._colorFor(activePos.cluster);
-        mesh.material.color.copy(col);
-        mesh.material.emissive.copy(col);
+        if (!isInsight) {
+          const activePos = t < 0.5 ? posA : posB;
+          const col = this._colorFor(activePos.cluster);
+          mesh.material.color.copy(col);
+          mesh.material.emissive.copy(col);
+        }
       } else if (posA && !posB) {
         mesh.position.set(posA.x - this.cx, posA.y - this.cy, posA.z - this.cz);
         mesh.material.opacity = 1.0 - t;
         mesh.visible = mesh.material.opacity > 0.01;
-        const col = this._colorFor(posA.cluster);
-        mesh.material.color.copy(col);
-        mesh.material.emissive.copy(col);
+        if (!isInsight) {
+          const col = this._colorFor(posA.cluster);
+          mesh.material.color.copy(col);
+          mesh.material.emissive.copy(col);
+        }
       } else if (!posA && posB) {
         mesh.position.set(posB.x - this.cx, posB.y - this.cy, posB.z - this.cz);
         mesh.material.opacity = t;
         mesh.visible = mesh.material.opacity > 0.01;
-        const col = this._colorFor(posB.cluster);
-        mesh.material.color.copy(col);
-        mesh.material.emissive.copy(col);
+        if (!isInsight) {
+          const col = this._colorFor(posB.cluster);
+          mesh.material.color.copy(col);
+          mesh.material.emissive.copy(col);
+        }
       } else {
         mesh.visible = false;
       }
@@ -907,6 +1170,14 @@ function buildSlider(topLabels, bottomLabels) {
   const sliderContainer = document.createElement('div');
   sliderContainer.className = 'slider-container';
 
+  // Thumb width in px — used to offset labels so they sit over the thumb's
+  // actual travel range (thumb center at 0% is ~THUMB_W/2 from the left edge).
+  const THUMB_W = 14;
+  function positionLabel(span, i, n) {
+    const pct = n === 1 ? 50 : (i / (n - 1)) * 100;
+    span.style.left = `calc(${pct}% + ${(0.5 - pct / 100) * THUMB_W}px)`;
+  }
+
   // Top labels
   const labelsTop = document.createElement('div');
   labelsTop.className = 'slider-labels';
@@ -914,6 +1185,7 @@ function buildSlider(topLabels, bottomLabels) {
     const span = document.createElement('span');
     span.textContent = topLabels[i];
     span.className = i === 0 ? 'active' : '';
+    positionLabel(span, i, topLabels.length);
     labelsTop.appendChild(span);
   }
   sliderContainer.appendChild(labelsTop);
@@ -936,6 +1208,7 @@ function buildSlider(topLabels, bottomLabels) {
       const span = document.createElement('span');
       span.textContent = bottomLabels[i];
       span.className = i === 0 ? 'active' : '';
+      positionLabel(span, i, bottomLabels.length);
       labelsBottom.appendChild(span);
     }
     sliderContainer.appendChild(labelsBottom);
