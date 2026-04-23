@@ -39,6 +39,7 @@ def save_run(
     result: PipelineResult,
     run_dir: Path,
     run_config: dict[str, Any],
+    presets: dict | None = None,
 ) -> None:
     """Save a complete pipeline run to a folder with human-readable files."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +59,7 @@ def save_run(
                 viz_coords=result.viz_coords,
                 title=f"{run_name} — Steered Embedding Space",
                 run_config=run_config,
+                presets=presets,
             )
             _save_viz_coords(
                 result, run_dir / "viz_coords_steered.csv",
@@ -69,6 +71,7 @@ def save_run(
                 viz_coords=result.viz_coords_original,
                 title=f"{run_name} — Original Embedding Space",
                 run_config=run_config,
+                presets=presets,
             )
             _save_viz_coords(
                 result, run_dir / "viz_coords_original.csv",
@@ -79,6 +82,7 @@ def save_run(
                 result, run_dir / "viz.html",
                 title=run_name,
                 run_config=run_config,
+                presets=presets,
             )
 
 

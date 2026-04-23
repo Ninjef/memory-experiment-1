@@ -14,6 +14,7 @@ def generate_viz_html(
     viz_coords: dict[str, tuple[float, float, float]] | None = None,
     title: str = "Cluster Visualization",
     run_config: dict | None = None,
+    presets: dict | None = None,
 ) -> None:
     """Write a standalone HTML file with an interactive 3D scatter plot.
 
@@ -23,6 +24,7 @@ def generate_viz_html(
         viz_coords: Coordinate dict to visualize. Defaults to result.viz_coords.
         title: Page title shown in the browser tab and header.
         run_config: Pipeline configuration dict to display in the UI.
+        presets: Optional preset config (pins, camera, toggles) to apply on load.
     """
     if viz_coords is None:
         viz_coords = result.viz_coords
@@ -109,10 +111,13 @@ def generate_viz_html(
 
     data_json = json.dumps(points)
     config_json = json.dumps(run_config or {})
+    presets_json = json.dumps(presets) if presets else "null"
 
     html = _HTML_TEMPLATE.replace("__DATA_JSON__", data_json).replace(
         "__TITLE__", title
-    ).replace("__CONFIG_JSON__", config_json)
+    ).replace("__CONFIG_JSON__", config_json).replace(
+        "__PRESETS_JSON__", presets_json
+    )
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -132,20 +137,26 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     border-radius: 6px; font-size: 13px; max-width: 360px;
     line-height: 1.4; border: 1px solid rgba(255,255,255,0.15);
   }
-  #tooltip .cluster-tag, .pinned-tooltip .cluster-tag {
+  #tooltip .cluster-tag {
     display: inline-block; padding: 2px 8px; border-radius: 3px;
     font-size: 11px; font-weight: 600; margin-bottom: 6px;
   }
   .pinned-tooltip {
     position: absolute; pointer-events: auto;
-    background: rgba(0,0,0,0.9); color: #fff; padding: 10px 14px;
-    border-radius: 6px; font-size: 13px; max-width: 360px;
+    background: rgba(0,0,0,0.9); color: #fff;
+    padding: 0.75em 1em; border-radius: 0.45em;
+    font-size: max(0.9vw, 10px); max-width: 25vw;
     line-height: 1.4; border: 1px solid rgba(255,255,255,0.3);
-    z-index: 90;
+    z-index: 90; cursor: grab; user-select: none;
+  }
+  .pinned-tooltip.dragging { cursor: grabbing; }
+  .pinned-tooltip .cluster-tag {
+    display: inline-block; padding: 0.15em 0.6em; border-radius: 0.2em;
+    font-size: 0.85em; font-weight: 600; margin-bottom: 0.45em;
   }
   .pinned-tooltip .pin-close {
-    position: absolute; top: 4px; right: 8px;
-    cursor: pointer; opacity: 0.5; font-size: 14px;
+    position: absolute; top: 0.3em; right: 0.6em;
+    cursor: pointer; opacity: 0.5; font-size: 1.05em;
   }
   .pinned-tooltip .pin-close:hover { opacity: 1; }
   #pin-lines {
@@ -153,8 +164,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     pointer-events: none; z-index: 89;
   }
   .pin-dot {
-    position: absolute; width: 8px; height: 8px;
-    border-radius: 50%; border: 2px solid rgba(255,255,255,0.8);
+    position: absolute; width: max(0.55vw, 6px); height: max(0.55vw, 6px);
+    border-radius: 50%; border: max(0.14vw, 1.5px) solid rgba(255,255,255,0.8);
     pointer-events: none; z-index: 91;
     transform: translate(-50%, -50%);
   }
@@ -186,6 +197,14 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     user-select: none;
   }
   #controls input[type="checkbox"] { cursor: pointer; }
+  #copy-preset {
+    display: block; margin-top: 8px; padding: 6px 12px;
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+    color: #eee; border-radius: 4px; cursor: pointer; font-size: 12px;
+    width: 100%;
+  }
+  #copy-preset:hover { background: rgba(255,255,255,0.2); }
+  #copy-preset.copied { background: rgba(100,200,100,0.3); border-color: rgba(100,200,100,0.5); }
   #info {
     position: absolute; bottom: 16px; left: 16px;
     font-size: 12px; opacity: 0.5;
@@ -247,6 +266,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const DATA = __DATA_JSON__;
 const CONFIG = __CONFIG_JSON__;
+const PRESETS = __PRESETS_JSON__;
 
 // Build config panel
 {
@@ -381,6 +401,7 @@ let controlsHTML = '<label><input type="checkbox" id="toggleClustering" checked>
 if (hasInsights) {
   controlsHTML += '<label style="margin-top:4px"><input type="checkbox" id="toggleInsights" checked> Show Insights</label>';
 }
+controlsHTML += '<button id="copy-preset">Copy Preset JSON</button>';
 controlsEl.innerHTML = controlsHTML;
 
 function applyClusterColors() {
@@ -490,6 +511,9 @@ function updatePinLines() {
     // Update dot position
     pin.dot.style.left = scr.x + 'px';
     pin.dot.style.top = scr.y + 'px';
+    // Reposition tooltip relative to projected point (offset is viewport fraction)
+    pin.el.style.left = (scr.x + pin.pinOffset.x * innerWidth) + 'px';
+    pin.el.style.top = (scr.y + pin.pinOffset.y * innerHeight) + 'px';
     // Update line: from dot to nearest edge of tooltip
     const rect = pin.el.getBoundingClientRect();
     const tipCx = rect.left + rect.width / 2;
@@ -512,6 +536,78 @@ function updatePinLines() {
   }
 }
 
+function createPin(hitMesh, pinColor, pinOffset) {
+  const p = hitMesh.userData;
+  const isInsight = p.type === 'insight';
+  const clusterLabel = p.cluster === -1 ? 'Noise' : `Cluster ${p.cluster}`;
+  const tagColor = isInsight ? '#d4a017' : clusterColor(p.cluster);
+  const tagLabel = isInsight ? `Insight (${clusterLabel})` : clusterLabel;
+
+  const el = document.createElement('div');
+  el.className = 'pinned-tooltip';
+  el.style.borderColor = pinColor;
+  const pinTagHTML = clusteringVisible ? `<div class="cluster-tag" style="background:${tagColor}">${tagLabel}</div><br>` : '';
+  el.innerHTML = `<span class="pin-close">&times;</span>` + pinTagHTML + p.text;
+
+  const scr = projectToScreen(hitMesh);
+  el.style.left = (scr.x + pinOffset.x * innerWidth) + 'px';
+  el.style.top = (scr.y + pinOffset.y * innerHeight) + 'px';
+  document.body.appendChild(el);
+
+  // Connector line
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('stroke', pinColor);
+  line.setAttribute('stroke-width', '1.5');
+  line.setAttribute('stroke-opacity', '0.7');
+  pinLinesSvg.appendChild(line);
+
+  // Dot on the node
+  const dot = document.createElement('div');
+  dot.className = 'pin-dot';
+  dot.style.borderColor = pinColor;
+  dot.style.background = pinColor;
+  document.body.appendChild(dot);
+
+  // Paint the 3D mesh the pin color (save originals to restore on close)
+  const origColor = hitMesh.material.color.clone();
+  const origEmissive = hitMesh.material.emissive.clone();
+  const meshPinColor = new THREE.Color(pinColor);
+  hitMesh.material.color.copy(meshPinColor);
+  hitMesh.material.emissive.copy(meshPinColor);
+
+  const pinObj = { el, mesh: hitMesh, line, dot, origColor, origEmissive, pinOffset };
+
+  // Drag support
+  let dragStart = null;
+  el.addEventListener('mousedown', (ev) => {
+    if (ev.target.closest('.pin-close')) return;
+    ev.preventDefault(); ev.stopPropagation();
+    dragStart = { mx: ev.clientX, my: ev.clientY, ox: pinOffset.x, oy: pinOffset.y };
+    el.classList.add('dragging');
+    const onMove = (me) => {
+      pinOffset.x = dragStart.ox + (me.clientX - dragStart.mx) / innerWidth;
+      pinOffset.y = dragStart.oy + (me.clientY - dragStart.my) / innerHeight;
+    };
+    const onUp = () => {
+      dragStart = null;
+      el.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  el.querySelector('.pin-close').addEventListener('click', () => {
+    el.remove(); line.remove(); dot.remove();
+    hitMesh.material.color.copy(origColor);
+    hitMesh.material.emissive.copy(origEmissive);
+    const idx = pinnedTips.indexOf(pinObj);
+    if (idx !== -1) pinnedTips.splice(idx, 1);
+  });
+  pinnedTips.push(pinObj);
+}
+
 renderer.domElement.addEventListener('mousedown', (e) => {
   mouseDownPos = { x: e.clientX, y: e.clientY };
 });
@@ -529,59 +625,11 @@ renderer.domElement.addEventListener('mouseup', (e) => {
 
   if (hits.length > 0) {
     const hitMesh = hits[0].object;
-    const p = hitMesh.userData;
-    const isInsight = p.type === 'insight';
-    const clusterLabel = p.cluster === -1 ? 'Noise' : `Cluster ${p.cluster}`;
-    const tagColor = isInsight ? '#d4a017' : clusterColor(p.cluster);
-    const tagLabel = isInsight ? `Insight (${clusterLabel})` : clusterLabel;
-
+    const scr = projectToScreen(hitMesh);
+    const pinOffset = { x: (e.clientX - scr.x + 16) / innerWidth, y: (e.clientY - scr.y + 16) / innerHeight };
     const pinColor = PIN_COLORS[pinColorIdx % PIN_COLORS.length];
     pinColorIdx++;
-
-    const el = document.createElement('div');
-    el.className = 'pinned-tooltip';
-    el.style.borderColor = pinColor;
-    const pinTagHTML = clusteringVisible ? `<div class="cluster-tag" style="background:${tagColor}">${tagLabel}</div><br>` : '';
-    el.innerHTML = `<span class="pin-close">&times;</span>` + pinTagHTML + p.text;
-    el.style.left = (e.clientX + 16) + 'px';
-    el.style.top = (e.clientY + 16) + 'px';
-    document.body.appendChild(el);
-
-    const rect = el.getBoundingClientRect();
-    if (rect.right > innerWidth) el.style.left = (e.clientX - rect.width - 16) + 'px';
-    if (rect.bottom > innerHeight) el.style.top = (e.clientY - rect.height - 16) + 'px';
-
-    // Connector line
-    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    line.setAttribute('stroke', pinColor);
-    line.setAttribute('stroke-width', '1.5');
-    line.setAttribute('stroke-opacity', '0.7');
-    pinLinesSvg.appendChild(line);
-
-    // Dot on the node
-    const dot = document.createElement('div');
-    dot.className = 'pin-dot';
-    dot.style.borderColor = pinColor;
-    dot.style.background = pinColor;
-    document.body.appendChild(dot);
-
-    // Paint the 3D mesh the pin color (save originals to restore on close)
-    const origColor = hitMesh.material.color.clone();
-    const origEmissive = hitMesh.material.emissive.clone();
-    const meshPinColor = new THREE.Color(pinColor);
-    hitMesh.material.color.copy(meshPinColor);
-    hitMesh.material.emissive.copy(meshPinColor);
-
-    const pinObj = { el, mesh: hitMesh, line, dot, origColor, origEmissive };
-
-    el.querySelector('.pin-close').addEventListener('click', () => {
-      el.remove(); line.remove(); dot.remove();
-      hitMesh.material.color.copy(origColor);
-      hitMesh.material.emissive.copy(origEmissive);
-      const idx = pinnedTips.indexOf(pinObj);
-      if (idx !== -1) pinnedTips.splice(idx, 1);
-    });
-    pinnedTips.push(pinObj);
+    createPin(hitMesh, pinColor, pinOffset);
   }
 });
 
@@ -602,6 +650,88 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
+
+// Copy Preset JSON
+document.getElementById('copy-preset').addEventListener('click', () => {
+  const preset = {
+    pins: pinnedTips.map(pin => ({
+      pointId: pin.mesh.userData.id,
+      color: pin.el.style.borderColor,
+      offset: { x: +pin.pinOffset.x.toFixed(4), y: +pin.pinOffset.y.toFixed(4) },
+    })),
+    camera: {
+      position: { x: +camera.position.x.toFixed(4), y: +camera.position.y.toFixed(4), z: +camera.position.z.toFixed(4) },
+      target: { x: +controls.target.x.toFixed(4), y: +controls.target.y.toFixed(4), z: +controls.target.z.toFixed(4) },
+    },
+    clustering: clusteringVisible,
+    insights: hasInsights ? (document.getElementById('toggleInsights')?.checked ?? true) : undefined,
+  };
+  navigator.clipboard.writeText(JSON.stringify(preset, null, 2)).then(() => {
+    const btn = document.getElementById('copy-preset');
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy Preset JSON'; btn.classList.remove('copied'); }, 2000);
+  });
+});
+
+// Apply presets on load
+function applyPresets() {
+  if (!PRESETS) return;
+
+  // 1. Toggle states
+  if (PRESETS.clustering === false) {
+    clusteringVisible = false;
+    document.getElementById('toggleClustering').checked = false;
+    applyClusterColors();
+  }
+  if (hasInsights && PRESETS.insights === false) {
+    const cb = document.getElementById('toggleInsights');
+    if (cb) {
+      cb.checked = false;
+      for (const m of insightMeshes) m.visible = false;
+    }
+  }
+
+  // 2. Camera
+  if (PRESETS.camera) {
+    const cp = PRESETS.camera.position;
+    const ct = PRESETS.camera.target;
+    if (cp) camera.position.set(cp.x, cp.y, cp.z);
+    if (ct) controls.target.set(ct.x, ct.y, ct.z);
+    controls.update();
+  }
+
+  // 3. UI visibility
+  if (PRESETS.ui) {
+    const hide = (id) => { const el = document.getElementById(id); if (el) el.style.display = 'none'; };
+    if (PRESETS.ui.config === false) hide('config-panel');
+    if (PRESETS.ui.controls === false) hide('controls');
+    if (PRESETS.ui.legend === false) hide('legend');
+    if (PRESETS.ui.info === false) hide('info');
+    if (PRESETS.ui.title === false) hide('run-name');
+  }
+
+  // 4. Pinned tooltips
+  if (PRESETS.pins && PRESETS.pins.length > 0) {
+    const idToMesh = {};
+    for (const m of [...memoryMeshes, ...insightMeshes]) {
+      idToMesh[m.userData.id] = m;
+    }
+    for (const pinDef of PRESETS.pins) {
+      const hitMesh = idToMesh[pinDef.pointId];
+      if (!hitMesh) continue;
+      const pinColor = pinDef.color || PIN_COLORS[pinColorIdx % PIN_COLORS.length];
+      pinColorIdx++;
+      const raw = pinDef.offset || { x: 0.015, y: -0.02 };
+      // Auto-detect old pixel offsets (abs > 2) vs new viewport fractions
+      const pinOffset = (Math.abs(raw.x) > 2 || Math.abs(raw.y) > 2)
+        ? { x: raw.x / innerWidth, y: raw.y / innerHeight }
+        : { x: raw.x, y: raw.y };
+      createPin(hitMesh, pinColor, pinOffset);
+    }
+  }
+}
+applyPresets();
 
 // Animate
 function animate() {
